@@ -36,7 +36,7 @@ parser.add_argument('--execution_engine', default='models/best.pt')
 parser.add_argument('--baseline_model', default=None)
 parser.add_argument('--model_type', default='FiLM')
 parser.add_argument('--debug_every', default=float('inf'), type=float)
-parser.add_argument('--use_gpu', default=1, type=int)
+# parser.add_argument('--use_gpu', default=1, type=int)
 
 # For running on a preprocessed dataset
 parser.add_argument('--input_question_h5', default=None)
@@ -45,6 +45,12 @@ parser.add_argument('--input_features_h5', default=None)
 # This will override the vocab stored in the checkpoint;
 # we need this to run CLEVR models on human data
 parser.add_argument('--vocab_json', default=None)
+
+# ShapeWorld input data (ignores the three above)
+parser.add_argument('--sw_name', default=None)
+parser.add_argument('--sw_variant', default=None)
+parser.add_argument('--sw_language', default=None)
+parser.add_argument('--sw_config', default=None)
 
 # For running on a single example
 parser.add_argument('--question', default=None)
@@ -78,7 +84,7 @@ parser.add_argument('--betas_from', default=None)  # Load betas from file
 # If this is passed, then save all predictions to this file
 parser.add_argument('--output_h5', default=None)
 parser.add_argument('--output_preds', default=None)
-parser.add_argument('--output_viz_dir', default='img/')
+parser.add_argument('--output_viz_dir', default=None)
 parser.add_argument('--output_program_stats_dir', default=None)
 
 grads = {}
@@ -87,6 +93,45 @@ programs = {}  # NOTE: Useful for zero-shot program manipulation when in debug m
 def main(args):
   if args.debug_every <= 1:
     pdb.set_trace()
+
+  if args.sw_name is not None:
+    assert args.image is None and args.question is None
+
+    from shapeworld import Dataset, torch_util
+    from shapeworld.datasets import clevr_util
+    from vr.data import ShapeWorldDataLoader
+
+    dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
+      language=args.sw_language, config=args.sw_config)
+
+    # assert not os.path.isfile('vocab.json')
+    with open('vocab.json', 'w') as filehandle:
+      question_token_to_idx = {
+        word: index + 2 if index > 0 else 0
+        for word, index in dataset.vocabularies['language'].items()
+      }
+      question_token_to_idx['<NULL>'] = 0
+      question_token_to_idx['<START>'] = 1
+      question_token_to_idx['<END>'] = 2
+      vocab = dict(
+        question_token_to_idx=question_token_to_idx,
+        program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
+        answer_token_to_idx={'false': 0, 'true': 1}
+      )
+      json.dump(vocab, filehandle)
+
+    args.vocab_json = 'vocab.json'
+
+    test_dataset = torch_util.ShapeWorldDataset(dataset=dataset)  # , mode=???, include_model=True)
+
+    loader_kwargs = {
+      'dataset': test_dataset,
+      'batch_size': args.batch_size,
+      'num_workers': 1
+    }
+
+    loader = ShapeWorldDataLoader(**loader_kwargs)
+
   model = None
   if args.baseline_model is not None:
     print('Loading baseline model from ', args.baseline_model)
@@ -106,9 +151,10 @@ def main(args):
     print('Must give either --baseline_model or --program_generator and --execution_engine')
     return
 
-  dtype = torch.FloatTensor
-  if args.use_gpu == 1:
+  if torch.cuda.is_available():
     dtype = torch.cuda.FloatTensor
+  else:
+    dtype = torch.FloatTensor
   if args.question is not None and args.image is not None:
     run_single_example(args, model, dtype, args.question)
   # Interactive mode
@@ -119,6 +165,9 @@ def main(args):
       # Get user question
       question_raw = input(">>> ")
       run_single_example(args, model, dtype, question_raw, feats_var)
+  elif args.sw_name is not None:
+    run_batch(args, model, dtype, loader)
+    os.remove('vocab.json')
   else:
     vocab = load_vocab(args)
     loader_kwargs = {
@@ -237,7 +286,7 @@ def run_single_example(args, model, dtype, question_raw, feats_var=None):
   if args.debug_every <= 1:
     pdb.set_trace()
 
-  if args.output_viz_dir != 'NA':
+  if args.output_viz_dir is not None and args.output_viz_dir != 'NA':
     viz_dir = args.output_viz_dir + question_raw + ' ' + predicted_answer
     if not os.path.isdir(viz_dir):
       os.mkdir(viz_dir)

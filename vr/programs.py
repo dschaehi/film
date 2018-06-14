@@ -137,7 +137,12 @@ def str_to_function(s):
       'function': s,
       'value_inputs': [],
     }
-  name, value_str = s.replace(']', '').split('[')
+  values = s.replace(']', '').split('[')
+  name, value_str = values
+  # if len(values) == 2:
+  #   name, value_str = values
+  # else:
+  #   name, value_str = values[:2]
   return {
     'function': name,
     'value_inputs': value_str.split(','),

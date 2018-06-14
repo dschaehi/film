@@ -31,7 +31,7 @@ class FiLMedNet(nn.Module):
                stem_num_layers=2,
                stem_batchnorm=False,
                stem_kernel_size=3,
-               stem_stride=1,
+               stem_stride2_freq=0,
                stem_padding=None,
                num_modules=4,
                module_num_layers=1,
@@ -77,7 +77,7 @@ class FiLMedNet(nn.Module):
     self.print_verbose_every = print_verbose_every
 
     # Initialize helper variables
-    self.stem_use_coords = (stem_stride == 1) and (self.use_coords_freq > 0)
+    self.stem_use_coords = (stem_stride2_freq == 0) and (self.use_coords_freq > 0)
     self.condition_pattern = condition_pattern
     if len(condition_pattern) == 0:
       self.condition_pattern = []
@@ -92,17 +92,25 @@ class FiLMedNet(nn.Module):
     self.num_extra_channels = 2 if self.use_coords_freq > 0 else 0
     if self.debug_every <= -1:
       self.print_verbose_every = 1
-    module_H = feature_dim[1] // (stem_stride ** stem_num_layers)  # Rough calc: work for main cases
-    module_W = feature_dim[2] // (stem_stride ** stem_num_layers)  # Rough calc: work for main cases
+    if stem_stride2_freq > 0:
+      module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
+      module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
+    else:
+      module_H = feature_dim[1]
+      module_W = feature_dim[2]
     self.coords = coord_map((module_H, module_W))
-    self.default_weight = Variable(torch.ones(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)
-    self.default_bias = Variable(torch.zeros(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)
+    if torch.cuda.is_available():
+      self.default_weight = Variable(torch.ones(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)
+      self.default_bias = Variable(torch.zeros(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)
+    else:
+      self.default_weight = Variable(torch.ones(1, 1, self.module_dim)).type(torch.FloatTensor)
+      self.default_bias = Variable(torch.zeros(1, 1, self.module_dim)).type(torch.FloatTensor)
 
     # Initialize stem
     stem_feature_dim = feature_dim[0] + self.stem_use_coords * self.num_extra_channels
     self.stem = build_stem(stem_feature_dim, module_dim,
                            num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
-                           kernel_size=stem_kernel_size, stride=stem_stride, padding=stem_padding)
+                           kernel_size=stem_kernel_size, stride2_freq=stem_stride2_freq, padding=stem_padding)
 
     # Initialize FiLMed network body
     self.function_modules = {}
@@ -170,8 +178,12 @@ class FiLMedNet(nn.Module):
     N, _, H, W = feats.size()
 
     # Propagate up the network from low-to-high numbered blocks
-    module_inputs = Variable(torch.zeros(feats.size()).unsqueeze(1).expand(
-      N, self.num_modules, self.module_dim, H, W)).type(torch.cuda.FloatTensor)
+    if torch.cuda.is_available():
+      module_inputs = Variable(torch.zeros(feats.size()).unsqueeze(1).expand(
+        N, self.num_modules, self.module_dim, H, W)).type(torch.cuda.FloatTensor)
+    else:
+      module_inputs = Variable(torch.zeros(feats.size()).unsqueeze(1).expand(
+        N, self.num_modules, self.module_dim, H, W)).type(torch.FloatTensor)
     module_inputs[:,0] = feats
     for fn_num in range(self.num_modules):
       if self.condition_method == 'concat':
@@ -304,8 +316,12 @@ def coord_map(shape, start=-1, end=1):
   Ranging min-max in the x and y directions, respectively.
   """
   m, n = shape
-  x_coord_row = torch.linspace(start, end, steps=n).type(torch.cuda.FloatTensor)
-  y_coord_row = torch.linspace(start, end, steps=m).type(torch.cuda.FloatTensor)
+  if torch.cuda.is_available():
+    x_coord_row = torch.linspace(start, end, steps=n).type(torch.cuda.FloatTensor)
+    y_coord_row = torch.linspace(start, end, steps=m).type(torch.cuda.FloatTensor)
+  else:
+    x_coord_row = torch.linspace(start, end, steps=n).type(torch.FloatTensor)
+    y_coord_row = torch.linspace(start, end, steps=m).type(torch.FloatTensor)
   x_coords = x_coord_row.unsqueeze(0).expand(torch.Size((m, n))).unsqueeze(0)
   y_coords = y_coord_row.unsqueeze(1).expand(torch.Size((m, n))).unsqueeze(0)
   return Variable(torch.cat([x_coords, y_coords], 0))

@@ -91,7 +91,7 @@ def encode(seq_tokens, token_to_idx, allow_unk=False):
 def decode(seq_idx, idx_to_token, delim=None, stop_at_end=True):
   tokens = []
   for idx in seq_idx:
-    tokens.append(idx_to_token[idx])
+    tokens.append(idx_to_token[int(idx)])
     if stop_at_end and tokens[-1] == '<END>':
       break
   if delim is None:

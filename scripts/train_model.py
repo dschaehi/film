@@ -51,6 +51,12 @@ parser.add_argument('--num_train_samples', default=None, type=int)
 parser.add_argument('--num_val_samples', default=None, type=int)
 parser.add_argument('--shuffle_train_data', default=1, type=int)
 
+# ShapeWorld input data (ignores all of the above)
+parser.add_argument('--sw_name', default=None)
+parser.add_argument('--sw_variant', default=None)
+parser.add_argument('--sw_language', default=None)
+parser.add_argument('--sw_config', default=None)
+
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
   choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
@@ -90,7 +96,7 @@ parser.add_argument('--gamma_option', default='linear',
 parser.add_argument('--gamma_baseline', default=1, type=float)
 parser.add_argument('--num_modules', default=4, type=int)
 parser.add_argument('--module_stem_kernel_size', default=3, type=int)
-parser.add_argument('--module_stem_stride', default=1, type=int)
+parser.add_argument('--module_stem_stride2_freq', default=0, type=int)
 parser.add_argument('--module_stem_padding', default=None, type=int)
 parser.add_argument('--module_num_layers', default=1, type=int)  # Only mnl=1 currently implemented
 parser.add_argument('--module_batchnorm_affine', default=0, type=int)  # 1 overrides other factors
@@ -152,52 +158,101 @@ def main(args):
     args.checkpoint_path = '%s_%06d%s' % (name, num, ext)
   print('Will save checkpoints to %s' % args.checkpoint_path)
 
-  vocab = utils.load_vocab(args.vocab_json)
+  if args.sw_name is not None:
+    from shapeworld import Dataset, torch_util
+    from shapeworld.datasets import clevr_util
+    from vr.data import ShapeWorldDataLoader
 
-  if args.use_local_copies == 1:
-    shutil.copy(args.train_question_h5, '/tmp/train_questions.h5')
-    shutil.copy(args.train_features_h5, '/tmp/train_features.h5')
-    shutil.copy(args.val_question_h5, '/tmp/val_questions.h5')
-    shutil.copy(args.val_features_h5, '/tmp/val_features.h5')
-    args.train_question_h5 = '/tmp/train_questions.h5'
-    args.train_features_h5 = '/tmp/train_features.h5'
-    args.val_question_h5 = '/tmp/val_questions.h5'
-    args.val_features_h5 = '/tmp/val_features.h5'
+    dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
+      language=args.sw_language, config=args.sw_config)
 
-  question_families = None
-  if args.family_split_file is not None:
-    with open(args.family_split_file, 'r') as f:
-      question_families = json.load(f)
+    # assert not os.path.isfile('vocab.json')
+    with open('vocab.json', 'w') as filehandle:
+      question_token_to_idx = {
+        word: index + 2 if index > 0 else 0
+        for word, index in dataset.vocabularies['language'].items()
+      }
+      question_token_to_idx['<NULL>'] = 0
+      question_token_to_idx['<START>'] = 1
+      question_token_to_idx['<END>'] = 2
+      vocab = dict(
+        question_token_to_idx=question_token_to_idx,
+        program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
+        answer_token_to_idx={'false': 0, 'true': 1}
+      )
+      json.dump(vocab, filehandle)
 
-  train_loader_kwargs = {
-    'question_h5': args.train_question_h5,
-    'feature_h5': args.train_features_h5,
-    'vocab': vocab,
-    'batch_size': args.batch_size,
-    'shuffle': args.shuffle_train_data == 1,
-    'question_families': question_families,
-    'max_samples': args.num_train_samples,
-    'num_workers': args.loader_num_workers,
-  }
-  val_loader_kwargs = {
-    'question_h5': args.val_question_h5,
-    'feature_h5': args.val_features_h5,
-    'vocab': vocab,
-    'batch_size': args.batch_size,
-    'question_families': question_families,
-    'max_samples': args.num_val_samples,
-    'num_workers': args.loader_num_workers,
-  }
+    args.feature_dim = ','.join(str(n) for n in reversed(dataset.world_shape()))
+    args.vocab_json = 'vocab.json'
 
-  with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
-       ClevrDataLoader(**val_loader_kwargs) as val_loader:
+    train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
+    val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation')
+
+    train_loader_kwargs = {
+      'dataset': train_dataset,
+      'batch_size': args.batch_size,
+      'num_workers': 1
+    }
+    val_loader_kwargs = {
+      'dataset': val_dataset,
+      'batch_size': args.batch_size,
+      'num_workers': 1
+    }
+
+    train_loader = ShapeWorldDataLoader(**train_loader_kwargs)
+    val_loader = ShapeWorldDataLoader(**val_loader_kwargs)
+
     train_loop(args, train_loader, val_loader)
 
-  if args.use_local_copies == 1 and args.cleanup_local_copies == 1:
-    os.remove('/tmp/train_questions.h5')
-    os.remove('/tmp/train_features.h5')
-    os.remove('/tmp/val_questions.h5')
-    os.remove('/tmp/val_features.h5')
+    os.remove('vocab.json')
+
+  else:
+    vocab = utils.load_vocab(args.vocab_json)
+
+    if args.use_local_copies == 1:
+      shutil.copy(args.train_question_h5, '/tmp/train_questions.h5')
+      shutil.copy(args.train_features_h5, '/tmp/train_features.h5')
+      shutil.copy(args.val_question_h5, '/tmp/val_questions.h5')
+      shutil.copy(args.val_features_h5, '/tmp/val_features.h5')
+      args.train_question_h5 = '/tmp/train_questions.h5'
+      args.train_features_h5 = '/tmp/train_features.h5'
+      args.val_question_h5 = '/tmp/val_questions.h5'
+      args.val_features_h5 = '/tmp/val_features.h5'
+
+    question_families = None
+    if args.family_split_file is not None:
+      with open(args.family_split_file, 'r') as f:
+        question_families = json.load(f)
+
+    train_loader_kwargs = {
+      'question_h5': args.train_question_h5,
+      'feature_h5': args.train_features_h5,
+      'vocab': vocab,
+      'batch_size': args.batch_size,
+      'shuffle': args.shuffle_train_data == 1,
+      'question_families': question_families,
+      'max_samples': args.num_train_samples,
+      'num_workers': args.loader_num_workers,
+    }
+    val_loader_kwargs = {
+      'question_h5': args.val_question_h5,
+      'feature_h5': args.val_features_h5,
+      'vocab': vocab,
+      'batch_size': args.batch_size,
+      'question_families': question_families,
+      'max_samples': args.num_val_samples,
+      'num_workers': args.loader_num_workers,
+    }
+
+    with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
+         ClevrDataLoader(**val_loader_kwargs) as val_loader:
+      train_loop(args, train_loader, val_loader)
+
+    if args.use_local_copies == 1 and args.cleanup_local_copies == 1:
+      os.remove('/tmp/train_questions.h5')
+      os.remove('/tmp/train_features.h5')
+      os.remove('/tmp/val_questions.h5')
+      os.remove('/tmp/val_features.h5')
 
 
 def train_loop(args, train_loader, val_loader):
@@ -236,7 +291,10 @@ def train_loop(args, train_loader, val_loader):
     print('Here is the baseline model')
     print(baseline_model)
     baseline_type = args.model_type
-  loss_fn = torch.nn.CrossEntropyLoss().cuda()
+  if torch.cuda.is_available():
+    loss_fn = torch.nn.CrossEntropyLoss().cuda()
+  else:
+    loss_fn = torch.nn.CrossEntropyLoss().cpu()
 
   stats = {
     'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
@@ -266,16 +324,29 @@ def train_loop(args, train_loader, val_loader):
 
     epoch += 1
     print('Starting epoch %d' % epoch)
-    for batch in train_loader:
+    train_loader_iter = iter(train_loader)
+    while True:
+      try:
+        batch = next(train_loader_iter)
+      except StopIteration:
+        break
+    # for batch in train_loader:
       t += 1
       questions, _, feats, answers, programs, _ = batch
       if isinstance(questions, list):
         questions = questions[0]
-      questions_var = Variable(questions.cuda())
-      feats_var = Variable(feats.cuda())
-      answers_var = Variable(answers.cuda())
-      if programs[0] is not None:
-        programs_var = Variable(programs.cuda())
+      if torch.cuda.is_available():
+        questions_var = Variable(questions.cuda())
+        feats_var = Variable(feats.cuda())
+        answers_var = Variable(answers.cuda())
+        if programs[0] is not None:
+          programs_var = Variable(programs.cuda())
+      else:
+        questions_var = Variable(questions.cpu())
+        feats_var = Variable(feats.cpu())
+        answers_var = Variable(answers.cpu())
+        if programs[0] is not None:
+          programs_var = Variable(programs.cpu())
 
       reward = None
       if args.model_type == 'PG':
@@ -316,7 +387,10 @@ def train_loop(args, train_loader, val_loader):
 
         if args.train_program_generator == 1:
           pg_optimizer.zero_grad()
-          program_generator.reinforce_backward(centered_reward.cuda())
+          if torch.cuda.is_available():
+            program_generator.reinforce_backward(centered_reward.cuda())
+          else:
+            program_generator.reinforce_backward(centered_reward.cpu())
           pg_optimizer.step()
       elif args.model_type == 'FiLM':
         if args.set_execution_engine_eval == 1:
@@ -461,7 +535,10 @@ def get_program_generator(args):
       pg = FiLMGen(**kwargs)
     else:
       pg = Seq2Seq(**kwargs)
-  pg.cuda()
+  if torch.cuda.is_available():
+    pg.cuda()
+  else:
+    pg.cpu()
   pg.train()
   return pg, kwargs
 
@@ -489,7 +566,7 @@ def get_execution_engine(args):
     if args.model_type == 'FiLM':
       kwargs['num_modules'] = args.num_modules
       kwargs['stem_kernel_size'] = args.module_stem_kernel_size
-      kwargs['stem_stride'] = args.module_stem_stride
+      kwargs['stem_stride2_freq'] = args.module_stem_stride2_freq
       kwargs['stem_padding'] = args.module_stem_padding
       kwargs['module_num_layers'] = args.module_num_layers
       kwargs['module_batchnorm_affine'] = args.module_batchnorm_affine == 1
@@ -506,7 +583,10 @@ def get_execution_engine(args):
       ee = FiLMedNet(**kwargs)
     else:
       ee = ModuleNet(**kwargs)
-  ee.cuda()
+  if torch.cuda.is_available():
+    ee.cuda()
+  else:
+    ee.cpu()
   ee.train()
   return ee, kwargs
 
@@ -568,7 +648,10 @@ def get_baseline_model(args):
       model.rnn.token_to_idx[token] = idx
     kwargs['vocab'] = vocab
     model.rnn.expand_vocab(vocab['question_token_to_idx'])
-  model.cuda()
+  if torch.cuda.is_available():
+    model.cuda()
+  else:
+    model.cpu()
   model.train()
   return model, kwargs
 
@@ -589,17 +672,27 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
     if isinstance(questions, list):
       questions = questions[0]
 
-    questions_var = Variable(questions.cuda(), volatile=True)
-    feats_var = Variable(feats.cuda(), volatile=True)
-    answers_var = Variable(feats.cuda(), volatile=True)
-    if programs[0] is not None:
-      programs_var = Variable(programs.cuda(), volatile=True)
+    if torch.cuda.is_available():
+      questions_var = Variable(questions.cuda(), volatile=True)
+      feats_var = Variable(feats.cuda(), volatile=True)
+      answers_var = Variable(feats.cuda(), volatile=True)
+      if programs[0] is not None:
+        programs_var = Variable(programs.cuda(), volatile=True)
+    else:
+      questions_var = Variable(questions.cpu(), volatile=True)
+      feats_var = Variable(feats.cpu(), volatile=True)
+      answers_var = Variable(feats.cpu(), volatile=True)
+      if programs[0] is not None:
+        programs_var = Variable(programs.cpu(), volatile=True)
 
     scores = None  # Use this for everything but PG
     if args.model_type == 'PG':
       vocab = utils.load_vocab(args.vocab_json)
       for i in range(questions.size(0)):
-        program_pred = program_generator.sample(Variable(questions[i:i+1].cuda(), volatile=True))
+        if torch.cuda.is_available():
+          program_pred = program_generator.sample(Variable(questions[i:i+1].cuda(), volatile=True))
+        else:
+          program_pred = program_generator.sample(Variable(questions[i:i+1].cpu(), volatile=True))
         program_pred_str = vr.preprocess.decode(program_pred, vocab['program_idx_to_token'])
         program_str = vr.preprocess.decode(programs[i], vocab['program_idx_to_token'])
         if program_pred_str == program_str:

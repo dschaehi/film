@@ -90,14 +90,17 @@ class ClevrDataset(Dataset):
     if program_seq is not None:
       program_json_seq = []
       for fn_idx in program_seq:
-        fn_str = self.vocab['program_idx_to_token'][fn_idx]
+        fn_str = self.vocab['program_idx_to_token'][int(fn_idx)]
         if fn_str == '<START>' or fn_str == '<END>': continue
         fn = vr.programs.str_to_function(fn_str)
         program_json_seq.append(fn)
-      if self.mode == 'prefix':
-        program_json = vr.programs.prefix_to_list(program_json_seq)
-      elif self.mode == 'postfix':
-        program_json = vr.programs.postfix_to_list(program_json_seq)
+      try:
+        if self.mode == 'prefix':
+          program_json = vr.programs.prefix_to_list(program_json_seq)
+        elif self.mode == 'postfix':
+          program_json = vr.programs.postfix_to_list(program_json_seq)
+      except:
+        program_json = None
 
     if q_type is None:
       return (question, image, feats, answer, program_seq, program_json)
@@ -176,3 +179,51 @@ def clevr_collate(batch):
     program_seq_batch = default_collate(transposed[4])
   program_struct_batch = transposed[5]
   return [question_batch, image_batch, feat_batch, answer_batch, program_seq_batch, program_struct_batch]
+
+
+class ShapeWorldDataLoader(DataLoader):
+
+  def __init__(self, **kwargs):
+    super(ShapeWorldDataLoader, self).__init__(**kwargs)
+
+  def __iter__(self):
+    for batch in super(ShapeWorldDataLoader, self).__iter__():
+      question = batch['caption'].long()
+      image = batch['world']
+      feats = batch['world']
+      answer = batch['agreement'].long()
+      if 'caption_model' in batch:
+        program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+      else:
+        program_seq = torch.tensor([0 for _ in batch['caption']])
+      program_json = dict()
+      yield question, image, feats, answer, program_seq, program_json
+
+
+# def shapeworld_collate(batch):
+#   for key, value in batch.items():
+#     if key == 'caption_model':
+#       batch[key] = default_collate(value)
+#     else:
+#       batch[key] = default_collate(value)
+#   return value
+#   default_collate(
+
+
+
+
+# Traceback (most recent call last):
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 42, in _worker_loop
+#     samples = collate_fn([dataset[i] for i in batch_indices])
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 116, in default_collate
+#     return {key: default_collate([d[key] for d in batch]) for key in batch[0]}
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 116, in <dictcomp>
+#     return {key: default_collate([d[key] for d in batch]) for key in batch[0]}
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 116, in default_collate
+#     return {key: default_collate([d[key] for d in batch]) for key in batch[0]}
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 116, in <dictcomp>
+#     return {key: default_collate([d[key] for d in batch]) for key in batch[0]}
+#   File "/home/aok25/miniconda3/lib/python3.6/site-packages/torch/utils/data/dataloader.py", line 116, in <listcomp>
+#     return {key: default_collate([d[key] for d in batch]) for key in batch[0]}
+# KeyError: \'predtype\'
+# '

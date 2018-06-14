@@ -45,7 +45,10 @@ def build_model(args):
     name = 'layer%d' % (i + 1)
     layers.append(getattr(cnn, name))
   model = torch.nn.Sequential(*layers)
-  model.cuda()
+  if torch.cuda.is_available():
+    model.cuda()
+  else:
+    model.cpu()
   model.eval()
   return model
 
@@ -60,7 +63,10 @@ def run_batch(cur_batch, model):
 
   image_batch = np.concatenate(cur_batch, 0).astype(np.float32)
   image_batch = (image_batch / 255.0 - mean) / std
-  image_batch = torch.FloatTensor(image_batch).cuda()
+  if torch.cuda.is_available():
+    image_batch = torch.FloatTensor(image_batch).cuda()
+  else:
+    image_batch = torch.FloatTensor(image_batch).cpu()
   image_batch = torch.autograd.Variable(image_batch, volatile=True)
 
   feats = model(image_batch)
