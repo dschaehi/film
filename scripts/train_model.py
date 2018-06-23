@@ -146,7 +146,9 @@ parser.add_argument('--weight_decay', default=0, type=float)
 parser.add_argument('--checkpoint_path', default='data/checkpoint.pt')
 parser.add_argument('--randomize_checkpoint_path', type=int, default=0)
 parser.add_argument('--avoid_checkpoint_override', default=0, type=int)
-parser.add_argument('--record_loss_every', default=1, type=int)
+parser.add_argument('--record_loss_every', default=100, type=int)
+parser.add_argument('--record_accuracy_10k_every', default=1000, type=int)
+parser.add_argument('--record_accuracy_every', default=1000, type=int)
 parser.add_argument('--checkpoint_every', default=10000, type=int)
 parser.add_argument('--time', default=0, type=int)
 
@@ -417,7 +419,7 @@ def train_loop(args, train_loader, val_loader):
             torch.nn.utils.clip_grad_norm(execution_engine.parameters(), args.grad_clip)
           ee_optimizer.step()
 
-      if t % args.record_loss_every == 0:
+      if t % args.record_loss_every == 0 or t == 1 or t == args.num_iterations:
         running_loss += loss.data[0]
         avg_loss = running_loss / args.record_loss_every
         print(t, avg_loss)
@@ -429,8 +431,9 @@ def train_loop(args, train_loader, val_loader):
       else:
         running_loss += loss.data[0]
 
-      if t % args.checkpoint_every == 0:
-        num_checkpoints += 1
+      if (t <= 10000 and t % args.record_accuracy_10k_every == 0) \
+          or t % args.record_accuracy_every == 0 \
+          or t == 1 or t == args.num_iterations:
         print('Checking training accuracy ... ')
         start = time.time()
         train_acc = check_accuracy(args, program_generator, execution_engine,
@@ -454,7 +457,6 @@ def train_loop(args, train_loader, val_loader):
         stats['train_accs'].append(train_acc)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
-
         if val_acc > stats['best_val_acc']:
           stats['best_val_acc'] = val_acc
           stats['model_t'] = t
@@ -462,6 +464,8 @@ def train_loop(args, train_loader, val_loader):
           best_ee_state = get_state(execution_engine)
           best_baseline_state = get_state(baseline_model)
 
+      if t % args.checkpoint_every == 0 or t == args.num_iterations:
+        num_checkpoints += 1
         checkpoint = {
           'args': args.__dict__,
           'program_generator_kwargs': pg_kwargs,

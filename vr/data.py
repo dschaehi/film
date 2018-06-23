@@ -195,7 +195,7 @@ class ShapeWorldDataLoader(DataLoader):
       if 'caption_model' in batch:
         program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
       else:
-        program_seq = torch.tensor([0 for _ in batch['caption']])
+        program_seq = torch.IntTensor([0 for _ in batch['caption']])
       program_json = dict()
       yield question, image, feats, answer, program_seq, program_json
 
