@@ -1,7 +1,7 @@
 #!/bin/bash
 
-checkpoint_path="/home/aok25/test/film.pt"
-log_path="/home/aok25/test/film.log"
+checkpoint_path="data/film_shapeworld.pt"
+log_path="data/film_shapeworld.log"
 python scripts/train_model.py \
   --sw_name existential \
   --module_stem_num_layers 6 \
@@ -17,7 +17,7 @@ python scripts/train_model.py \
   --record_accuracy_10k_every 1000 \
   --record_accuracy_every 5000 \
   --checkpoint_every 50000 \
-  --num_val_samples 149991 \
+  --num_val_samples 10000 \
   --optimizer Adam \
   --learning_rate 3e-4 \
   --batch_size 64 \

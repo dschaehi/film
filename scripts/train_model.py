@@ -163,7 +163,24 @@ def main(args):
   if args.sw_name is not None:
     from shapeworld import Dataset, torch_util
     from shapeworld.datasets import clevr_util
-    from vr.data import ShapeWorldDataLoader
+
+    class ShapeWorldDataLoader(torch_util.ShapeWorldDataLoader):
+
+      def __init__(self, **kwargs):
+        super(ShapeWorldDataLoader, self).__init__(**kwargs)
+
+      def __iter__(self):
+        for batch in super(ShapeWorldDataLoader, self).__iter__():
+          question = batch['caption'].long()
+          image = batch['world']
+          feats = batch['world']
+          answer = batch['agreement'].long()
+          if 'caption_model' in batch:
+            program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+          else:
+            program_seq = torch.IntTensor([0 for _ in batch['caption']])
+          program_json = dict()
+          yield question, image, feats, answer, program_seq, program_json
 
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
@@ -188,21 +205,10 @@ def main(args):
     args.vocab_json = 'vocab.json'
 
     train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
-    val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation')
+    val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=True)
 
-    train_loader_kwargs = {
-      'dataset': train_dataset,
-      'batch_size': args.batch_size,
-      'num_workers': 1
-    }
-    val_loader_kwargs = {
-      'dataset': val_dataset,
-      'batch_size': args.batch_size,
-      'num_workers': 1
-    }
-
-    train_loader = ShapeWorldDataLoader(**train_loader_kwargs)
-    val_loader = ShapeWorldDataLoader(**val_loader_kwargs)
+    train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
+    val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
 
     train_loop(args, train_loader, val_loader)
 
@@ -298,11 +304,17 @@ def train_loop(args, train_loader, val_loader):
   else:
     loss_fn = torch.nn.CrossEntropyLoss().cpu()
 
-  stats = {
-    'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
-    'train_accs': [], 'val_accs': [], 'val_accs_ts': [],
-    'best_val_acc': -1, 'model_t': 0,
-  }
+  if args.sw_name is None:
+    stats = {
+      'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
+      'train_accs': [], 'val_accs': [], 'val_accs_ts': [],
+      'best_val_acc': -1, 'model_t': 0,
+    }
+  else:
+    stats = {
+      'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
+      'val_accs': [], 'val_accs_ts': [], 'best_val_acc': -1, 'model_t': 0,
+    }
   t, epoch, reward_moving_average = 0, 0, 0
 
   set_mode('train', [program_generator, execution_engine, baseline_model])
@@ -434,16 +446,20 @@ def train_loop(args, train_loader, val_loader):
       if (t <= 10000 and t % args.record_accuracy_10k_every == 0) \
           or t % args.record_accuracy_every == 0 \
           or t == 1 or t == args.num_iterations:
-        print('Checking training accuracy ... ')
-        start = time.time()
-        train_acc = check_accuracy(args, program_generator, execution_engine,
-                                   baseline_model, train_loader)
-        if args.time == 1:
-          train_pass_time = (time.time() - start)
-          train_pass_total_time += train_pass_time
-          print(colored('TRAIN PASS AVG TIME: ' + str(train_pass_total_time / num_checkpoints), 'red'))
-          print(colored('Train Pass Time      : ' + str(train_pass_time), 'red'))
-        print('train accuracy is', train_acc)
+
+        if args.sw_name is None:
+          print('Checking training accuracy ... ')
+          start = time.time()
+          train_acc = check_accuracy(args, program_generator, execution_engine,
+                                     baseline_model, train_loader)
+          if args.time == 1:
+            train_pass_time = (time.time() - start)
+            train_pass_total_time += train_pass_time
+            print(colored('TRAIN PASS AVG TIME: ' + str(train_pass_total_time / num_checkpoints), 'red'))
+            print(colored('Train Pass Time      : ' + str(train_pass_time), 'red'))
+          print('train accuracy is', train_acc)
+          stats['train_accs'].append(train_acc)
+
         print('Checking validation accuracy ...')
         start = time.time()
         val_acc = check_accuracy(args, program_generator, execution_engine,
@@ -454,9 +470,9 @@ def train_loop(args, train_loader, val_loader):
           print(colored('VAL PASS AVG TIME:   ' + str(val_pass_total_time / num_checkpoints), 'cyan'))
           print(colored('Val Pass Time        : ' + str(val_pass_time), 'cyan'))
         print('val accuracy is ', val_acc)
-        stats['train_accs'].append(train_acc)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
+
         if val_acc > stats['best_val_acc']:
           stats['best_val_acc'] = val_acc
           stats['model_t'] = t
