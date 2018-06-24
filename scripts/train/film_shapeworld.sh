@@ -11,13 +11,13 @@ python scripts/train_model.py \
   --module_stem_padding 1 \
   --checkpoint_path $checkpoint_path \
   --model_type FiLM \
-  --num_iterations 20000000 \
+  --num_iterations 100000 \
   --print_verbose_every 20000000 \
   --record_loss_every 100 \
   --record_accuracy_10k_every 1000 \
   --record_accuracy_every 5000 \
   --checkpoint_every 50000 \
-  --num_val_samples 10000 \
+  --num_val_samples 100000 \
   --optimizer Adam \
   --learning_rate 3e-4 \
   --batch_size 64 \

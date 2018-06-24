@@ -434,7 +434,7 @@ def train_loop(args, train_loader, val_loader):
       if t % args.record_loss_every == 0 or t == 1 or t == args.num_iterations:
         running_loss += loss.data[0]
         avg_loss = running_loss / args.record_loss_every
-        print(t, avg_loss)
+        print(t, avg_loss, flush=True)
         stats['train_losses'].append(avg_loss)
         stats['train_losses_ts'].append(t)
         if reward is not None:
@@ -457,7 +457,7 @@ def train_loop(args, train_loader, val_loader):
             train_pass_total_time += train_pass_time
             print(colored('TRAIN PASS AVG TIME: ' + str(train_pass_total_time / num_checkpoints), 'red'))
             print(colored('Train Pass Time      : ' + str(train_pass_time), 'red'))
-          print('train accuracy is', train_acc)
+          print('train accuracy is', train_acc, flush=True)
           stats['train_accs'].append(train_acc)
 
         print('Checking validation accuracy ...')
@@ -469,7 +469,7 @@ def train_loop(args, train_loader, val_loader):
           val_pass_total_time += val_pass_time
           print(colored('VAL PASS AVG TIME:   ' + str(val_pass_total_time / num_checkpoints), 'cyan'))
           print(colored('Val Pass Time        : ' + str(val_pass_time), 'cyan'))
-        print('val accuracy is ', val_acc)
+        print('val accuracy is ', val_acc, flush=True)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
 
@@ -495,7 +495,7 @@ def train_loop(args, train_loader, val_loader):
         }
         for k, v in stats.items():
           checkpoint[k] = v
-        print('Saving checkpoint to %s' % args.checkpoint_path)
+        print('Saving checkpoint to %s' % args.checkpoint_path, flush=True)
         torch.save(checkpoint, args.checkpoint_path)
         del checkpoint['program_generator_state']
         del checkpoint['execution_engine_state']
