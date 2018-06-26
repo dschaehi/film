@@ -51,10 +51,11 @@ parser.add_argument('--sw_name', default=None)
 parser.add_argument('--sw_variant', default=None)
 parser.add_argument('--sw_language', default=None)
 parser.add_argument('--sw_config', default=None)
+parser.add_argument('--sw_mode', default=None)
 
 # For running on a single example
 parser.add_argument('--question', default=None)
-parser.add_argument('--image', default='img/CLEVR_val_000017.png')
+parser.add_argument('--image', default=None)
 parser.add_argument('--cnn_model', default='resnet101')
 parser.add_argument('--cnn_model_stage', default=3, type=int)
 parser.add_argument('--image_width', default=224, type=int)
@@ -99,38 +100,32 @@ def main(args):
 
     from shapeworld import Dataset, torch_util
     from shapeworld.datasets import clevr_util
-    from vr.data import ShapeWorldDataLoader
+
+    class ShapeWorldDataLoader(torch_util.ShapeWorldDataLoader):
+
+      def __init__(self, **kwargs):
+        super(ShapeWorldDataLoader, self).__init__(**kwargs)
+
+      def __iter__(self):
+        for batch in super(ShapeWorldDataLoader, self).__iter__():
+          question = batch['caption'].long()
+          image = batch['world']
+          feats = batch['world']
+          answer = batch['agreement'].long()
+          if 'caption_model' in batch:
+            program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+          else:
+            program_seq = torch.IntTensor([0 for _ in batch['caption']])
+          program_json = dict()
+          yield question, image, feats, answer, program_seq, program_json
 
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
 
-    # assert not os.path.isfile('vocab.json')
-    with open('vocab.json', 'w') as filehandle:
-      question_token_to_idx = {
-        word: index + 2 if index > 0 else 0
-        for word, index in dataset.vocabularies['language'].items()
-      }
-      question_token_to_idx['<NULL>'] = 0
-      question_token_to_idx['<START>'] = 1
-      question_token_to_idx['<END>'] = 2
-      vocab = dict(
-        question_token_to_idx=question_token_to_idx,
-        program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
-        answer_token_to_idx={'false': 0, 'true': 1}
-      )
-      json.dump(vocab, filehandle)
+    dataset = torch_util.ShapeWorldDataset(dataset=dataset,  # include_model=True
+      mode=(None if args.sw_mode == 'none' else args.sw_mode), epoch=(args.num_samples is None))
 
-    args.vocab_json = 'vocab.json'
-
-    test_dataset = torch_util.ShapeWorldDataset(dataset=dataset)  # , mode=???, include_model=True)
-
-    loader_kwargs = {
-      'dataset': test_dataset,
-      'batch_size': args.batch_size,
-      'num_workers': 1
-    }
-
-    loader = ShapeWorldDataLoader(**loader_kwargs)
+    loader = ShapeWorldDataLoader(dataset=dataset, batch_size=args.batch_size)  # num_workers=1
 
   model = None
   if args.baseline_model is not None:
@@ -176,8 +171,6 @@ def main(args):
       'vocab': vocab,
       'batch_size': args.batch_size,
     }
-    if args.num_samples is not None and args.num_samples > 0:
-      loader_kwargs['max_samples'] = args.num_samples
     if args.family_split_file is not None:
       with open(args.family_split_file, 'r') as f:
         loader_kwargs['question_families'] = json.load(f)
@@ -254,7 +247,7 @@ def run_single_example(args, model, dtype, question_raw, feats_var=None):
   # Print results
   predicted_probs = scores.data.cpu()
   _, predicted_answer_idx = predicted_probs[0].max(dim=0)
-  predicted_probs = F.softmax(Variable(predicted_probs[0])).data
+  predicted_probs = F.softmax(Variable(predicted_probs[0]), dim=0).data
   predicted_answer = vocab['answer_idx_to_token'][predicted_answer_idx[0]]
 
   answers_to_probs = {}
@@ -395,9 +388,9 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
 
     film_params += [programs_pred.cpu().data.numpy()]
     scores = ee(feats_var, programs_pred, save_activations=True)
-    probs = F.softmax(scores)
+    probs = F.softmax(scores, dim=1)
 
-    _, preds = scores.data.cpu().max(1)
+    _, preds = scores.data.cpu().max(dim=1)
     all_programs.append(programs_pred.data.cpu().clone())
     all_scores.append(scores.data.cpu().clone())
     all_probs.append(probs.data.cpu().clone())
@@ -405,6 +398,9 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
     if answers[0] is not None:
       num_correct += (preds == answers).sum()
     num_samples += preds.size(0)
+
+    if args.num_samples is not None and num_samples >= args.num_samples:
+      break
 
   acc = float(num_correct) / num_samples
   print('Got %d / %d = %.2f correct' % (num_correct, num_samples, 100 * acc))
@@ -533,9 +529,9 @@ def run_baseline_batch(args, model, loader, dtype):
     questions_var = Variable(questions.type(dtype).long(), volatile=True)
     feats_var = Variable(feats.type(dtype), volatile=True)
     scores = model(questions_var, feats_var)
-    probs = F.softmax(scores)
+    probs = F.softmax(scores, dim=1)
 
-    _, preds = scores.data.cpu().max(1)
+    _, preds = scores.data.cpu().max(dim=1)
     all_scores.append(scores.data.cpu().clone())
     all_probs.append(probs.data.cpu().clone())
 

@@ -56,6 +56,7 @@ parser.add_argument('--sw_name', default=None)
 parser.add_argument('--sw_variant', default=None)
 parser.add_argument('--sw_language', default=None)
 parser.add_argument('--sw_config', default=None)
+parser.add_argument('--sw_mixer', default=0, type=int)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
@@ -185,8 +186,7 @@ def main(args):
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
 
-    # assert not os.path.isfile('vocab.json')
-    with open('vocab.json', 'w') as filehandle:
+    if args.program_generator_start_from is None:
       question_token_to_idx = {
         word: index + 2 if index > 0 else 0
         for word, index in dataset.vocabularies['language'].items()
@@ -199,20 +199,38 @@ def main(args):
         program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
         answer_token_to_idx={'false': 0, 'true': 1}
       )
-      json.dump(vocab, filehandle)
+      with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
+        json.dump(vocab, filehandle)
+
+    else:
+      with open(args.program_generator_start_from + '.vocab', 'r') as filehandle:
+        vocab = json.load(filehandle)
+      question_token_to_idx = vocab['question_token_to_idx']
+      index = len(question_token_to_idx)
+      for word in dataset.vocabularies['language']:
+        if word not in question_token_to_idx:
+          question_token_to_idx[word] = index
+          index += 1
+      with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
+        json.dump(vocab, filehandle)
 
     args.feature_dim = ','.join(str(n) for n in reversed(dataset.world_shape()))
-    args.vocab_json = 'vocab.json'
+    args.vocab_json = args.checkpoint_path + '.vocab'
 
     train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
-    val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=True)
-
     train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
-    val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
+
+    if args.sw_mixer == 0:
+      val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=(args.num_val_samples is None))
+      val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
+
+    else:
+      val_loader = list()
+      for val_dataset in dataset.datasets:
+        val_dataset = torch_util.ShapeWorldDataset(dataset=val_dataset, mode='validation', epoch=(args.num_val_samples is None))
+        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # num_workers=1
 
     train_loop(args, train_loader, val_loader)
-
-    os.remove('vocab.json')
 
   else:
     vocab = utils.load_vocab(args.vocab_json)
@@ -319,8 +337,9 @@ def train_loop(args, train_loader, val_loader):
 
   set_mode('train', [program_generator, execution_engine, baseline_model])
 
-  print('train_loader has %d samples' % len(train_loader.dataset))
-  print('val_loader has %d samples' % len(val_loader.dataset))
+  if args.sw_name is None:
+    print('train_loader has %d samples' % len(train_loader.dataset))
+    print('val_loader has %d samples' % len(val_loader.dataset))
 
   num_checkpoints = 0
   epoch_start_time = 0.0
@@ -685,6 +704,10 @@ def set_mode(mode, models):
 
 
 def check_accuracy(args, program_generator, execution_engine, baseline_model, loader):
+  if isinstance(loader, list):
+    for loader in loader:
+      check_accuracy(args, program_generator, execution_engine, baseline_model, loader)
+
   set_mode('eval', [program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
   for batch in loader:
