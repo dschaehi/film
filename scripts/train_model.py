@@ -185,6 +185,8 @@ def main(args):
 
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
+    print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
+    print('Config: ' + str(args.sw_config))
 
     if args.program_generator_start_from is None:
       question_token_to_idx = {

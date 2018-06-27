@@ -121,6 +121,8 @@ def main(args):
 
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
+    print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
+    print('Config: ' + str(args.sw_config))
 
     dataset = torch_util.ShapeWorldDataset(dataset=dataset,  # include_model=True
       mode=(None if args.sw_mode == 'none' else args.sw_mode), epoch=(args.num_samples is None))
@@ -162,7 +164,6 @@ def main(args):
       run_single_example(args, model, dtype, question_raw, feats_var)
   elif args.sw_name is not None:
     run_batch(args, model, dtype, loader)
-    os.remove('vocab.json')
   else:
     vocab = load_vocab(args)
     loader_kwargs = {
