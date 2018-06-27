@@ -222,15 +222,16 @@ def main(args):
     train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
     train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
 
-    if args.sw_mixer == 0:
+
+    if args.sw_mixer == 1:
+      val_loader = list()
+      for d in dataset.datasets:
+        val_dataset = torch_util.ShapeWorldDataset(dataset=d, mode='validation', epoch=(args.num_val_samples is None))
+        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # num_workers=1
+    else:
       val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=(args.num_val_samples is None))
       val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
 
-    else:
-      val_loader = list()
-      for val_dataset in dataset.datasets:
-        val_dataset = torch_util.ShapeWorldDataset(dataset=val_dataset, mode='validation', epoch=(args.num_val_samples is None))
-        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # num_workers=1
 
     train_loop(args, train_loader, val_loader)
 
@@ -490,7 +491,11 @@ def train_loop(args, train_loader, val_loader):
           val_pass_total_time += val_pass_time
           print(colored('VAL PASS AVG TIME:   ' + str(val_pass_total_time / num_checkpoints), 'cyan'))
           print(colored('Val Pass Time        : ' + str(val_pass_time), 'cyan'))
-        print('val accuracy is ', val_acc, flush=True)
+        if isinstance(val_acc, list):
+          for loader, acc in zip(val_loader, val_acc):
+            print('val accuracy for', loader.dataset.dataset, 'is', acc)
+          val_acc = sum(val_acc) / len(val_acc)
+        print('val accuracy is', val_acc, flush=True)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
 
@@ -516,7 +521,7 @@ def train_loop(args, train_loader, val_loader):
         }
         for k, v in stats.items():
           checkpoint[k] = v
-        print('Saving checkpoint to %s' % args.checkpoint_path, flush=True)
+        print('Saving checkpoint to', args.checkpoint_path, flush=True)
         torch.save(checkpoint, args.checkpoint_path)
         del checkpoint['program_generator_state']
         del checkpoint['execution_engine_state']
@@ -707,8 +712,10 @@ def set_mode(mode, models):
 
 def check_accuracy(args, program_generator, execution_engine, baseline_model, loader):
   if isinstance(loader, list):
+    accuracies = list()
     for loader in loader:
-      check_accuracy(args, program_generator, execution_engine, baseline_model, loader)
+      accuracies.append(check_accuracy(args, program_generator, execution_engine, baseline_model, loader))
+    return accuracies
 
   set_mode('eval', [program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
