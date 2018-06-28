@@ -119,7 +119,7 @@ parser.add_argument('--cnn_res_block_dim', default=128, type=int)
 parser.add_argument('--cnn_num_res_blocks', default=0, type=int)
 parser.add_argument('--cnn_proj_dim', default=512, type=int)
 parser.add_argument('--cnn_pooling', default='maxpool2',
-  choices=['none', 'maxpool2'])
+  choices=['none', 'maxpool2', 'maxpoolfull'])
 
 # Stacked-Attention options
 parser.add_argument('--stacked_attn_dim', default=512, type=int)
@@ -222,7 +222,6 @@ def main(args):
     train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
     train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
 
-
     if args.sw_mixer == 1:
       val_loader = list()
       for d in dataset.datasets:
@@ -231,7 +230,6 @@ def main(args):
     else:
       val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=(args.num_val_samples is None))
       val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
-
 
     train_loop(args, train_loader, val_loader)
 
@@ -660,7 +658,13 @@ def get_baseline_model(args):
       'rnn_dim': args.rnn_hidden_dim,
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
-      'cnn_feat_dim': parse_int_list(args.feature_dim),
+      'feature_dim': parse_int_list(args.feature_dim),
+      'stem_module_dim': args.module_dim,
+      'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
       'cnn_num_res_blocks': args.cnn_num_res_blocks,
       'cnn_res_block_dim': args.cnn_res_block_dim,
       'cnn_proj_dim': args.cnn_proj_dim,
@@ -677,7 +681,13 @@ def get_baseline_model(args):
       'rnn_dim': args.rnn_hidden_dim,
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
-      'cnn_feat_dim': parse_int_list(args.feature_dim),
+      'feature_dim': parse_int_list(args.feature_dim),
+      'stem_module_dim': args.module_dim,
+      'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
       'stacked_attn_dim': args.stacked_attn_dim,
       'num_stacked_attn': args.num_stacked_attn,
       'fc_dims': parse_int_list(args.classifier_fc_dims),
