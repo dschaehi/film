@@ -723,8 +723,8 @@ def set_mode(mode, models):
 def check_accuracy(args, program_generator, execution_engine, baseline_model, loader):
   if isinstance(loader, list):
     accuracies = list()
-    for loader in loader:
-      accuracies.append(check_accuracy(args, program_generator, execution_engine, baseline_model, loader))
+    for l in loader:
+      accuracies.append(check_accuracy(args, program_generator, execution_engine, baseline_model, l))
     return accuracies
 
   set_mode('eval', [program_generator, execution_engine, baseline_model])

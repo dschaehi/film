@@ -40,7 +40,7 @@ class StackedAttention(nn.Module):
     u_proj = self.Wu(u) # N x K
     u_proj_expand = u_proj.view(N, K, 1, 1).expand(N, K, H, W)
     h = F.tanh(v_proj + u_proj_expand)
-    p = F.softmax(self.Wp(h).view(N, H * W)).view(N, 1, H, W)
+    p = F.softmax(self.Wp(h).view(N, H * W), dim=1).view(N, 1, H, W)
     self.attention_maps = p.data.clone()
 
     v_tilde = (p.expand_as(v) * v).sum(3).sum(2).view(N, D)
