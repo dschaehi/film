@@ -34,7 +34,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--program_generator', default='models/best.pt')
 parser.add_argument('--execution_engine', default='models/best.pt')
 parser.add_argument('--baseline_model', default=None)
-parser.add_argument('--model_type', default='FiLM')
+parser.add_argument('--model_type', default='FiLM',
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']))
 parser.add_argument('--debug_every', default=float('inf'), type=float)
 # parser.add_argument('--use_gpu', default=1, type=int)
 
@@ -131,7 +132,8 @@ def main(args):
 
   model = None
   if args.baseline_model is not None:
-    print('Loading baseline model from ', args.baseline_model)
+    assert args.model_type in ('LSTM', 'CNN+LSTM', 'CNN+LSTM+SA')
+    print('Loading baseline model from', args.baseline_model)
     model, _ = utils.load_baseline(args.baseline_model)
     if args.vocab_json is not None:
       new_vocab = utils.load_vocab(args.vocab_json)
@@ -538,7 +540,6 @@ def run_baseline_batch(args, model, loader, dtype):
 
     num_correct += (preds == answers).sum()
     num_samples += preds.size(0)
-    print('Ran %d samples' % num_samples)
 
   acc = float(num_correct) / num_samples
   print('Got %d / %d = %.2f correct' % (num_correct, num_samples, 100 * acc))

@@ -189,7 +189,6 @@ class CnnLstmModel(nn.Module):
       'stride2_freq': stem_stride2_freq,
       'padding': stem_padding
     }
-    print(stem_kwargs)
     self.stem = build_stem(**stem_kwargs)
 
     if stem_stride2_freq > 0:

@@ -161,7 +161,7 @@ def main(args):
     args.checkpoint_path = '%s_%06d%s' % (name, num, ext)
   print('Will save checkpoints to %s' % args.checkpoint_path)
 
-  if args.sw_name is not None:
+  if args.sw_name is not None or args.sw_config is not None:
     from shapeworld import Dataset, torch_util
     from shapeworld.datasets import clevr_util
 
@@ -323,7 +323,7 @@ def train_loop(args, train_loader, val_loader):
   else:
     loss_fn = torch.nn.CrossEntropyLoss().cpu()
 
-  if args.sw_name is None:
+  if args.sw_name is None and args.sw_config is None:
     stats = {
       'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
       'train_accs': [], 'val_accs': [], 'val_accs_ts': [],
@@ -338,7 +338,7 @@ def train_loop(args, train_loader, val_loader):
 
   set_mode('train', [program_generator, execution_engine, baseline_model])
 
-  if args.sw_name is None:
+  if args.sw_name is None and args.sw_config is None:
     print('train_loader has %d samples' % len(train_loader.dataset))
     print('val_loader has %d samples' % len(val_loader.dataset))
 
@@ -467,7 +467,7 @@ def train_loop(args, train_loader, val_loader):
           or t % args.record_accuracy_every == 0 \
           or t == 1 or t == args.num_iterations:
 
-        if args.sw_name is None:
+        if args.sw_name is None and args.sw_config is None:
           print('Checking training accuracy ... ')
           start = time.time()
           train_acc = check_accuracy(args, program_generator, execution_engine,
