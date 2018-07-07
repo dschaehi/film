@@ -56,10 +56,11 @@ parser.add_argument('--sw_name', default=None)
 parser.add_argument('--sw_variant', default=None)
 parser.add_argument('--sw_language', default=None)
 parser.add_argument('--sw_config', default=None)
+parser.add_argument('--sw_mixer', default=0, type=int)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
-  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0'])
 parser.add_argument('--train_program_generator', default=1, type=int)
 parser.add_argument('--train_execution_engine', default=1, type=int)
 parser.add_argument('--baseline_train_only_rnn', default=0, type=int)
@@ -87,8 +88,10 @@ parser.add_argument('--set_execution_engine_eval', default=0, type=int)
 parser.add_argument('--program_generator_parameter_efficient', default=1, type=int)
 parser.add_argument('--rnn_output_batchnorm', default=0, type=int)
 parser.add_argument('--bidirectional', default=0, type=int)
+# hx: parser.add_argument('--encoder_type', default='gru', type=str,
+  # hx: choices=['linear', 'gru', 'lstm'])
 parser.add_argument('--encoder_type', default='gru', type=str,
-  choices=['linear', 'gru', 'lstm'])
+  choices=['linear', 'gru', 'lstm', 'bow'])
 parser.add_argument('--decoder_type', default='linear', type=str,
   choices=['linear', 'gru', 'lstm'])
 parser.add_argument('--gamma_option', default='linear',
@@ -118,7 +121,7 @@ parser.add_argument('--cnn_res_block_dim', default=128, type=int)
 parser.add_argument('--cnn_num_res_blocks', default=0, type=int)
 parser.add_argument('--cnn_proj_dim', default=512, type=int)
 parser.add_argument('--cnn_pooling', default='maxpool2',
-  choices=['none', 'maxpool2'])
+  choices=['none', 'maxpool2', 'maxpoolfull'])
 
 # Stacked-Attention options
 parser.add_argument('--stacked_attn_dim', default=512, type=int)
@@ -160,7 +163,7 @@ def main(args):
     args.checkpoint_path = '%s_%06d%s' % (name, num, ext)
   print('Will save checkpoints to %s' % args.checkpoint_path)
 
-  if args.sw_name is not None:
+  if args.sw_name is not None or args.sw_config is not None:
     from shapeworld import Dataset, torch_util
     from shapeworld.datasets import clevr_util
 
@@ -184,9 +187,10 @@ def main(args):
 
     dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
+    print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
+    print('Config: ' + str(args.sw_config))
 
-    # assert not os.path.isfile('vocab.json')
-    with open('vocab.json', 'w') as filehandle:
+    if args.program_generator_start_from is None:
       question_token_to_idx = {
         word: index + 2 if index > 0 else 0
         for word, index in dataset.vocabularies['language'].items()
@@ -199,20 +203,37 @@ def main(args):
         program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
         answer_token_to_idx={'false': 0, 'true': 1}
       )
-      json.dump(vocab, filehandle)
+      with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
+        json.dump(vocab, filehandle)
+
+    else:
+      with open(args.program_generator_start_from + '.vocab', 'r') as filehandle:
+        vocab = json.load(filehandle)
+      question_token_to_idx = vocab['question_token_to_idx']
+      index = len(question_token_to_idx)
+      for word in dataset.vocabularies['language']:
+        if word not in question_token_to_idx:
+          question_token_to_idx[word] = index
+          index += 1
+      with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
+        json.dump(vocab, filehandle)
 
     args.feature_dim = ','.join(str(n) for n in reversed(dataset.world_shape()))
-    args.vocab_json = 'vocab.json'
+    args.vocab_json = args.checkpoint_path + '.vocab'
 
     train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
-    val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=True)
-
     train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
-    val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
+
+    if args.sw_mixer == 1:
+      val_loader = list()
+      for d in dataset.datasets:
+        val_dataset = torch_util.ShapeWorldDataset(dataset=d, mode='validation', epoch=(args.num_val_samples is None))
+        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # num_workers=1
+    else:
+      val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=(args.num_val_samples is None))
+      val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
 
     train_loop(args, train_loader, val_loader)
-
-    os.remove('vocab.json')
 
   else:
     vocab = utils.load_vocab(args.vocab_json)
@@ -274,16 +295,16 @@ def train_loop(args, train_loader, val_loader):
 
   # Set up model
   optim_method = getattr(torch.optim, args.optimizer)
-  if args.model_type in ['FiLM', 'PG', 'PG+EE']:
+  if args.model_type in ['FiLM', 'PG', 'PG+EE', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0']:
     program_generator, pg_kwargs = get_program_generator(args)
     pg_optimizer = optim_method(program_generator.parameters(),
                                 lr=args.learning_rate,
                                 weight_decay=args.weight_decay)
     print('Here is the conditioning network:')
     print(program_generator)
-  if args.model_type in ['FiLM', 'EE', 'PG+EE']:
+  if args.model_type in ['FiLM', 'EE', 'PG+EE', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0']:
     execution_engine, ee_kwargs = get_execution_engine(args)
-    ee_optimizer = optim_method(execution_engine.parameters(),
+    ee_optimizer = optim_method(filter(lambda p: p.requires_grad, execution_engine.parameters()),
                                 lr=args.learning_rate,
                                 weight_decay=args.weight_decay)
     print('Here is the conditioned network:')
@@ -304,7 +325,7 @@ def train_loop(args, train_loader, val_loader):
   else:
     loss_fn = torch.nn.CrossEntropyLoss().cpu()
 
-  if args.sw_name is None:
+  if args.sw_name is None and args.sw_config is None:
     stats = {
       'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
       'train_accs': [], 'val_accs': [], 'val_accs_ts': [],
@@ -319,8 +340,9 @@ def train_loop(args, train_loader, val_loader):
 
   set_mode('train', [program_generator, execution_engine, baseline_model])
 
-  print('train_loader has %d samples' % len(train_loader.dataset))
-  print('val_loader has %d samples' % len(val_loader.dataset))
+  if args.sw_name is None and args.sw_config is None:
+    print('train_loader has %d samples' % len(train_loader.dataset))
+    print('val_loader has %d samples' % len(val_loader.dataset))
 
   num_checkpoints = 0
   epoch_start_time = 0.0
@@ -406,7 +428,7 @@ def train_loop(args, train_loader, val_loader):
           else:
             program_generator.reinforce_backward(centered_reward.cpu())
           pg_optimizer.step()
-      elif args.model_type == 'FiLM':
+      elif args.model_type.startswith('FiLM'):
         if args.set_execution_engine_eval == 1:
           set_mode('eval', [execution_engine])
         programs_pred = program_generator(questions_var)
@@ -447,7 +469,7 @@ def train_loop(args, train_loader, val_loader):
           or t % args.record_accuracy_every == 0 \
           or t == 1 or t == args.num_iterations:
 
-        if args.sw_name is None:
+        if args.sw_name is None and args.sw_config is None:
           print('Checking training accuracy ... ')
           start = time.time()
           train_acc = check_accuracy(args, program_generator, execution_engine,
@@ -469,7 +491,11 @@ def train_loop(args, train_loader, val_loader):
           val_pass_total_time += val_pass_time
           print(colored('VAL PASS AVG TIME:   ' + str(val_pass_total_time / num_checkpoints), 'cyan'))
           print(colored('Val Pass Time        : ' + str(val_pass_time), 'cyan'))
-        print('val accuracy is ', val_acc, flush=True)
+        if isinstance(val_acc, list):
+          for loader, acc in zip(val_loader, val_acc):
+            print('val accuracy for', loader.dataset.dataset, 'is', acc)
+          val_acc = sum(val_acc) / len(val_acc)
+        print('val accuracy is', val_acc, flush=True)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
 
@@ -495,7 +521,7 @@ def train_loop(args, train_loader, val_loader):
         }
         for k, v in stats.items():
           checkpoint[k] = v
-        print('Saving checkpoint to %s' % args.checkpoint_path, flush=True)
+        print('Saving checkpoint to', args.checkpoint_path, flush=True)
         torch.save(checkpoint, args.checkpoint_path)
         del checkpoint['program_generator_state']
         del checkpoint['execution_engine_state']
@@ -540,7 +566,7 @@ def get_program_generator(args):
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
     }
-    if args.model_type == 'FiLM':
+    if args.model_type.startswith('FiLM'):
       kwargs['parameter_efficient'] = args.program_generator_parameter_efficient == 1
       kwargs['output_batchnorm'] = args.rnn_output_batchnorm == 1
       kwargs['bidirectional'] = args.bidirectional == 1
@@ -552,6 +578,8 @@ def get_program_generator(args):
       kwargs['module_num_layers'] = args.module_num_layers
       kwargs['module_dim'] = args.module_dim
       kwargs['debug_every'] = args.debug_every
+      if args.model_type == 'FiLM+BoW':
+        kwargs['encoder_type'] = 'bow'
       pg = FiLMGen(**kwargs)
     else:
       pg = Seq2Seq(**kwargs)
@@ -583,8 +611,10 @@ def get_execution_engine(args):
       'classifier_batchnorm': args.classifier_batchnorm == 1,
       'classifier_dropout': args.classifier_dropout,
     }
-    if args.model_type == 'FiLM':
+    if args.model_type.startswith('FiLM'):
       kwargs['num_modules'] = args.num_modules
+      kwargs['stem_use_resnet'] = (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0')
+      kwargs['stem_resnet_fixed'] = args.model_type == 'FiLM+ResNet0'
       kwargs['stem_kernel_size'] = args.module_stem_kernel_size
       kwargs['stem_stride2_freq'] = args.module_stem_stride2_freq
       kwargs['stem_padding'] = args.module_stem_padding
@@ -634,7 +664,13 @@ def get_baseline_model(args):
       'rnn_dim': args.rnn_hidden_dim,
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
-      'cnn_feat_dim': parse_int_list(args.feature_dim),
+      'feature_dim': parse_int_list(args.feature_dim),
+      'stem_module_dim': args.module_dim,
+      'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
       'cnn_num_res_blocks': args.cnn_num_res_blocks,
       'cnn_res_block_dim': args.cnn_res_block_dim,
       'cnn_proj_dim': args.cnn_proj_dim,
@@ -651,7 +687,13 @@ def get_baseline_model(args):
       'rnn_dim': args.rnn_hidden_dim,
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
-      'cnn_feat_dim': parse_int_list(args.feature_dim),
+      'feature_dim': parse_int_list(args.feature_dim),
+      'stem_module_dim': args.module_dim,
+      'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
       'stacked_attn_dim': args.stacked_attn_dim,
       'num_stacked_attn': args.num_stacked_attn,
       'fc_dims': parse_int_list(args.classifier_fc_dims),
@@ -685,6 +727,12 @@ def set_mode(mode, models):
 
 
 def check_accuracy(args, program_generator, execution_engine, baseline_model, loader):
+  if isinstance(loader, list):
+    accuracies = list()
+    for l in loader:
+      accuracies.append(check_accuracy(args, program_generator, execution_engine, baseline_model, l))
+    return accuracies
+
   set_mode('eval', [program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
   for batch in loader:
@@ -724,7 +772,7 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
       programs_pred = program_generator.reinforce_sample(
                           questions_var, argmax=True)
       scores = execution_engine(feats_var, programs_pred)
-    elif args.model_type == 'FiLM':
+    elif args.model_type.startswith('FiLM'):
       programs_pred = program_generator(questions_var)
       scores = execution_engine(feats_var, programs_pred)
     elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:

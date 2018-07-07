@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-from vr.models.layers import init_modules, ResidualBlock
+from vr.models.layers import init_modules, build_stem, ResidualBlock
 from vr.embedding import expand_embedding_vocab
 
 
@@ -40,10 +40,10 @@ class StackedAttention(nn.Module):
     u_proj = self.Wu(u) # N x K
     u_proj_expand = u_proj.view(N, K, 1, 1).expand(N, K, H, W)
     h = F.tanh(v_proj + u_proj_expand)
-    p = F.softmax(self.Wp(h).view(N, H * W)).view(N, 1, H, W)
+    p = F.softmax(self.Wp(h).view(N, H * W), dim=1).view(N, 1, H, W)
     self.attention_maps = p.data.clone()
 
-    v_tilde = (p.expand_as(v) * v).sum(2).sum(3).view(N, D)
+    v_tilde = (p.expand_as(v) * v).sum(3).sum(2).view(N, D)
     next_u = u + v_tilde
     return next_u
 
@@ -105,6 +105,11 @@ def build_cnn(feat_dim=(1024, 14, 14),
   if pooling == 'maxpool2':
     layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
     H, W = H // 2, W // 2
+  elif pooling == 'maxpoolfull':
+    if H != W:
+      assert(NotImplementedError)
+    layers.append(nn.MaxPool2d(kernel_size=H, stride=H, padding=0))
+    H = W = 1
   return nn.Sequential(*layers), (C, H, W)
 
 
@@ -160,9 +165,10 @@ class LstmModel(nn.Module):
 class CnnLstmModel(nn.Module):
   def __init__(self, vocab,
                rnn_wordvec_dim=300, rnn_dim=256, rnn_num_layers=2, rnn_dropout=0,
-               cnn_feat_dim=(1024,14,14),
-               cnn_res_block_dim=128, cnn_num_res_blocks=0,
-               cnn_proj_dim=512, cnn_pooling='maxpool2',
+               feature_dim=(1024, 14, 14), stem_module_dim=128,
+               stem_num_layers=2, stem_batchnorm=False, stem_kernel_size=3,
+               stem_stride2_freq=0, stem_padding=None, cnn_res_block_dim=128,
+               cnn_num_res_blocks=0, cnn_proj_dim=512, cnn_pooling='maxpool2',
                fc_dims=(1024,), fc_use_batchnorm=False, fc_dropout=0):
     super(CnnLstmModel, self).__init__()
     rnn_kwargs = {
@@ -174,8 +180,26 @@ class CnnLstmModel(nn.Module):
     }
     self.rnn = LstmEncoder(**rnn_kwargs)
 
+    stem_kwargs = {
+      'feature_dim': feature_dim[0],
+      'module_dim': stem_module_dim,
+      'num_layers': stem_num_layers,
+      'with_batchnorm': stem_batchnorm,
+      'kernel_size': stem_kernel_size,
+      'stride2_freq': stem_stride2_freq,
+      'padding': stem_padding
+    }
+    self.stem = build_stem(**stem_kwargs)
+
+    if stem_stride2_freq > 0:
+      module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
+      module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
+    else:
+      module_H = feature_dim[1]
+      module_W = feature_dim[2]
+
     cnn_kwargs = {
-      'feat_dim': cnn_feat_dim,
+      'feat_dim': (stem_module_dim, module_H, module_W),
       'res_block_dim': cnn_res_block_dim,
       'num_res_blocks': cnn_num_res_blocks,
       'proj_dim': cnn_proj_dim,
@@ -196,6 +220,7 @@ class CnnLstmModel(nn.Module):
     N = questions.size(0)
     assert N == feats.size(0)
     q_feats = self.rnn(questions)
+    feats = self.stem(feats)
     img_feats = self.cnn(feats)
     cat_feats = torch.cat([q_feats, img_feats.view(N, -1)], 1)
     scores = self.classifier(cat_feats)
@@ -205,7 +230,9 @@ class CnnLstmModel(nn.Module):
 class CnnLstmSaModel(nn.Module):
   def __init__(self, vocab,
                rnn_wordvec_dim=300, rnn_dim=256, rnn_num_layers=2, rnn_dropout=0,
-               cnn_feat_dim=(1024,14,14),
+               feature_dim=(1024, 14, 14), stem_module_dim=128,
+               stem_num_layers=2, stem_batchnorm=False, stem_kernel_size=3,
+               stem_stride2_freq=0, stem_padding=None,
                stacked_attn_dim=512, num_stacked_attn=2,
                fc_use_batchnorm=False, fc_dropout=0, fc_dims=(1024,)):
     super(CnnLstmSaModel, self).__init__()
@@ -218,8 +245,18 @@ class CnnLstmSaModel(nn.Module):
     }
     self.rnn = LstmEncoder(**rnn_kwargs)
 
-    C, H, W = cnn_feat_dim
-    self.image_proj = nn.Conv2d(C, rnn_dim, kernel_size=1, padding=0)
+    stem_kwargs = {
+      'feature_dim': feature_dim[0],
+      'module_dim': stem_module_dim,
+      'num_layers': stem_num_layers,
+      'with_batchnorm': stem_batchnorm,
+      'kernel_size': stem_kernel_size,
+      'stride2_freq': stem_stride2_freq,
+      'padding': stem_padding
+    }
+    self.stem = build_stem(**stem_kwargs)
+
+    self.image_proj = nn.Conv2d(stem_module_dim, rnn_dim, kernel_size=1, padding=0)
     self.stacked_attns = []
     for i in range(num_stacked_attn):
       sa = StackedAttention(rnn_dim, stacked_attn_dim)
@@ -238,6 +275,7 @@ class CnnLstmSaModel(nn.Module):
 
   def forward(self, questions, feats):
     u = self.rnn(questions)
+    feats = self.stem(feats)
     v = self.image_proj(feats)
 
     for sa in self.stacked_attns:

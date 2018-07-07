@@ -38,6 +38,9 @@ class FiLMGen(nn.Module):
     super(FiLMGen, self).__init__()
     self.encoder_type = encoder_type
     self.decoder_type = decoder_type
+    self.wordvec_dim = wordvec_dim
+    self.hidden_dim = hidden_dim
+    self.rnn_num_layers = rnn_num_layers
     self.output_batchnorm = output_batchnorm
     self.bidirectional = bidirectional
     self.num_dir = 2 if self.bidirectional else 1
@@ -67,6 +70,7 @@ class FiLMGen(nn.Module):
       self.cond_feat_size = 4 * self.module_dim + 2 * self.num_modules
 
     self.encoder_embed = nn.Embedding(encoder_vocab_size, wordvec_dim)
+    self.encoder_bow_linear = nn.Linear(wordvec_dim, hidden_dim * self.num_dir)
     self.encoder_rnn = init_rnn(self.encoder_type, wordvec_dim, hidden_dim, rnn_num_layers,
                                 dropout=rnn_dropout, bidirectional=self.bidirectional)
     self.decoder_rnn = init_rnn(self.decoder_type, hidden_dim, hidden_dim, rnn_num_layers,
@@ -86,10 +90,14 @@ class FiLMGen(nn.Module):
     V_in = self.encoder_embed.num_embeddings
     V_out = self.cond_feat_size
     D = self.encoder_embed.embedding_dim
-    H = self.encoder_rnn.hidden_size
-    H_full = self.encoder_rnn.hidden_size * self.num_dir
-    L = self.encoder_rnn.num_layers * self.num_dir
-
+    if self.encoder_type == 'bow':
+      H = self.hidden_dim
+      H_full = self.hidden_dim * self.num_dir
+      L = self.rnn_num_layers
+    else:
+      H = self.encoder_rnn.hidden_size
+      H_full = self.encoder_rnn.hidden_size * self.num_dir
+      L = self.encoder_rnn.num_layers * self.num_dir
     N = x.size(0) if x is not None else None
     T_in = x.size(1) if x is not None else None
     T_out = self.num_modules
@@ -114,14 +122,16 @@ class FiLMGen(nn.Module):
     V_in, V_out, D, H, H_full, L, N, T_in, T_out = self.get_dims(x=x)
     x, idx = self.before_rnn(x)  # Tokenized word sequences (questions), end index
     embed = self.encoder_embed(x)
-    h0 = Variable(torch.zeros(L, N, H).type_as(embed.data))
+    if self.encoder_type == 'bow':
+      embed = torch.mean(embed, dim=1)
+      return self.encoder_bow_linear(embed).view(N, H_full)
 
+    h0 = Variable(torch.zeros(L, N, H).type_as(embed.data))
     if self.encoder_type == 'lstm':
       c0 = Variable(torch.zeros(L, N, H).type_as(embed.data))
       out, _ = self.encoder_rnn(embed, (h0, c0))
     elif self.encoder_type == 'gru':
       out, _ = self.encoder_rnn(embed, h0)
-
     # Pull out the hidden state for the last non-null value in each input
     idx = idx.view(N, 1, 1).expand(N, 1, H_full)
     return out.gather(1, idx).view(N, H_full)
@@ -202,6 +212,8 @@ def init_rnn(rnn_type, hidden_dim1, hidden_dim2, rnn_num_layers,
     return nn.LSTM(hidden_dim1, hidden_dim2, rnn_num_layers, dropout=dropout,
                    batch_first=True, bidirectional=bidirectional)
   elif rnn_type == 'linear':
+    return None
+  elif rnn_type == 'bow':
     return None
   else:
     print('RNN type ' + str(rnn_type) + ' not yet implemented.')

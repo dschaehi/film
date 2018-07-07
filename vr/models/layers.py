@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import kaiming_normal, kaiming_uniform
-
+import torchvision
 
 class ResidualBlock(nn.Module):
   def __init__(self, in_dim, out_dim=None, with_residual=True, with_batchnorm=True):
@@ -70,25 +70,56 @@ class Flatten(nn.Module):
     return x.view(x.size(0), -1)
 
 
-def build_stem(feature_dim, module_dim, num_layers=2, with_batchnorm=True,
-               kernel_size=3, stride2_freq=0, padding=None):
-  layers = []
-  prev_dim = feature_dim
-  if padding is None:  # Calculate default padding when None provided
-    if kernel_size % 2 == 0:
-      raise(NotImplementedError)
-    padding = kernel_size // 2
-  for i in range(num_layers):
-    if stride2_freq > 0 and (i + 1) % stride2_freq == 0:
-      stride = 2
-    else:
-      stride = 1
-    layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=kernel_size,
-                            stride=stride, padding=padding))
-    if with_batchnorm:
-      layers.append(nn.BatchNorm2d(module_dim))
-    layers.append(nn.ReLU(inplace=True))
-    prev_dim = module_dim
+def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_stage = 3, num_layers=2, with_batchnorm=True,
+               kernel_size=3, stride=1, stride2_freq=0, padding=None):
+  if use_resnet:
+    if not hasattr(torchvision.models, 'resnet101'):
+      raise ValueError('Invalid model "resnet101"')
+    loaded_model = getattr(torchvision.models, 'resnet101')(pretrained=True)
+    layers = [
+      loaded_model.conv1,
+      loaded_model.bn1,
+      loaded_model.relu,
+      loaded_model.maxpool
+    ]
+    for i in range(resnet_model_stage):
+      name = 'layer%d' % (i + 1)
+      layers.append(getattr(loaded_model, name))
+    # Freeze parameters of ResNet (fixed ResNet)
+    if resnet_fixed:
+      for layer in layers:
+        for param in layer.parameters():
+          param.requires_grad = False
+    prev_dim = feature_dim
+    if padding is None:
+      if kernel_size % 2 == 0:
+        raise(NotImplementedError)
+      padding = kernel_size // 2
+    for i in range(num_layers):
+      layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=kernel_size,
+                              stride=stride, padding=padding))
+      if with_batchnorm:
+        layers.append(nn.BatchNorm2d(module_dim))
+      layers.append(nn.ReLU(inplace=True))
+      prev_dim = module_dim
+  else: # custom CNN
+    layers = []
+    prev_dim = feature_dim
+    if padding is None:  # Calculate default padding when None provided
+      if kernel_size % 2 == 0:
+        raise(NotImplementedError)
+      padding = kernel_size // 2
+    for i in range(num_layers):
+      if stride2_freq > 0 and (i + 1) % stride2_freq == 0:
+        stride = 2
+      else:
+        stride = 1
+      layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=kernel_size,
+                              stride=stride, padding=padding))
+      if with_batchnorm:
+        layers.append(nn.BatchNorm2d(module_dim))
+      layers.append(nn.ReLU(inplace=True))
+      prev_dim = module_dim
   return nn.Sequential(*layers)
 
 

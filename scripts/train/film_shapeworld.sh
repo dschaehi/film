@@ -50,4 +50,10 @@ python scripts/train_model.py \
   --use_beta 1 \
   --condition_method bn-film \
   --program_generator_parameter_efficient 1 \
+  --cnn_res_block_dim 128 \
+  --cnn_num_res_blocks 0 \
+  --cnn_proj_dim 512 \
+  --cnn_pooling maxpoolfull \
+  --stacked_attn_dim 512 \
+  --num_stacked_attn 2 \
   | tee $log_path
