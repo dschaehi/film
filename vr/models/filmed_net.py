@@ -29,8 +29,12 @@ class FiLM(nn.Module):
 class FiLMedNet(nn.Module):
   def __init__(self, vocab, feature_dim=(1024, 14, 14),
                stem_num_layers=2,
+               stem_use_resnet=False,
+               stem_resnet_fixed=False,
+               resnet_model_stage = 3,
                stem_batchnorm=False,
                stem_kernel_size=3,
+               stem_stride=1,
                stem_stride2_freq=0,
                stem_padding=None,
                num_modules=4,
@@ -59,7 +63,7 @@ class FiLMedNet(nn.Module):
     super(FiLMedNet, self).__init__()
 
     num_answers = len(vocab['answer_idx_to_token'])
-
+  
     self.stem_times = []
     self.module_times = []
     self.classifier_times = []
@@ -81,7 +85,7 @@ class FiLMedNet(nn.Module):
     self.condition_pattern = condition_pattern
     if len(condition_pattern) == 0:
       self.condition_pattern = []
-      for i in range(self.module_num_layers * self.num_modules):
+      for _ in range(self.module_num_layers * self.num_modules):
         self.condition_pattern.append(self.condition_method != 'concat')
     else:
       self.condition_pattern = [i > 0 for i in self.condition_pattern]
@@ -92,7 +96,10 @@ class FiLMedNet(nn.Module):
     self.num_extra_channels = 2 if self.use_coords_freq > 0 else 0
     if self.debug_every <= -1:
       self.print_verbose_every = 1
-    if stem_stride2_freq > 0:
+    if stem_use_resnet:
+      module_H = feature_dim[1] // (2 ** (resnet_model_stage + 1))
+      module_W = feature_dim[2] // (2 ** (resnet_model_stage + 1))
+    elif stem_stride2_freq > 0:
       module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
       module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
     else:
@@ -107,10 +114,12 @@ class FiLMedNet(nn.Module):
       self.default_bias = Variable(torch.zeros(1, 1, self.module_dim)).type(torch.FloatTensor)
 
     # Initialize stem
+    if stem_use_resnet:
+      feature_dim = (1024, module_H, module_W)
     stem_feature_dim = feature_dim[0] + self.stem_use_coords * self.num_extra_channels
-    self.stem = build_stem(stem_feature_dim, module_dim,
-                           num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
-                           kernel_size=stem_kernel_size, stride2_freq=stem_stride2_freq, padding=stem_padding)
+    self.stem = build_stem(stem_use_resnet, stem_resnet_fixed, stem_feature_dim, module_dim,
+                           resnet_model_stage=resnet_model_stage, num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
+                           kernel_size=stem_kernel_size, stride=stem_stride, stride2_freq=stem_stride2_freq, padding=stem_padding)
 
     # Initialize FiLMed network body
     self.function_modules = {}
@@ -172,7 +181,9 @@ class FiLMedNet(nn.Module):
       batch_coords = self.coords.unsqueeze(0).expand(torch.Size((x.size(0), *self.coords.size())))
     if self.stem_use_coords:
       x = torch.cat([x, batch_coords], 1)
+    # print('x.shape: ', x.shape)
     feats = self.stem(x)
+    # print('feats.shape: ', feats.shape)
     if save_activations:
       self.feats = feats
     N, _, H, W = feats.size()

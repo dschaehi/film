@@ -60,7 +60,7 @@ parser.add_argument('--sw_mixer', default=0, type=int)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
-  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0'])
 parser.add_argument('--train_program_generator', default=1, type=int)
 parser.add_argument('--train_execution_engine', default=1, type=int)
 parser.add_argument('--baseline_train_only_rnn', default=0, type=int)
@@ -88,8 +88,10 @@ parser.add_argument('--set_execution_engine_eval', default=0, type=int)
 parser.add_argument('--program_generator_parameter_efficient', default=1, type=int)
 parser.add_argument('--rnn_output_batchnorm', default=0, type=int)
 parser.add_argument('--bidirectional', default=0, type=int)
+# hx: parser.add_argument('--encoder_type', default='gru', type=str,
+  # hx: choices=['linear', 'gru', 'lstm'])
 parser.add_argument('--encoder_type', default='gru', type=str,
-  choices=['linear', 'gru', 'lstm'])
+  choices=['linear', 'gru', 'lstm', 'bow'])
 parser.add_argument('--decoder_type', default='linear', type=str,
   choices=['linear', 'gru', 'lstm'])
 parser.add_argument('--gamma_option', default='linear',
@@ -293,16 +295,16 @@ def train_loop(args, train_loader, val_loader):
 
   # Set up model
   optim_method = getattr(torch.optim, args.optimizer)
-  if args.model_type in ['FiLM', 'PG', 'PG+EE']:
+  if args.model_type in ['FiLM', 'PG', 'PG+EE', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0']:
     program_generator, pg_kwargs = get_program_generator(args)
     pg_optimizer = optim_method(program_generator.parameters(),
                                 lr=args.learning_rate,
                                 weight_decay=args.weight_decay)
     print('Here is the conditioning network:')
     print(program_generator)
-  if args.model_type in ['FiLM', 'EE', 'PG+EE']:
+  if args.model_type in ['FiLM', 'EE', 'PG+EE', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0']:
     execution_engine, ee_kwargs = get_execution_engine(args)
-    ee_optimizer = optim_method(execution_engine.parameters(),
+    ee_optimizer = optim_method(filter(lambda p: p.requires_grad, execution_engine.parameters()),
                                 lr=args.learning_rate,
                                 weight_decay=args.weight_decay)
     print('Here is the conditioned network:')
@@ -426,7 +428,7 @@ def train_loop(args, train_loader, val_loader):
           else:
             program_generator.reinforce_backward(centered_reward.cpu())
           pg_optimizer.step()
-      elif args.model_type == 'FiLM':
+      elif args.model_type.startswith('FiLM'):
         if args.set_execution_engine_eval == 1:
           set_mode('eval', [execution_engine])
         programs_pred = program_generator(questions_var)
@@ -564,7 +566,7 @@ def get_program_generator(args):
       'rnn_num_layers': args.rnn_num_layers,
       'rnn_dropout': args.rnn_dropout,
     }
-    if args.model_type == 'FiLM':
+    if args.model_type.startswith('FiLM'):
       kwargs['parameter_efficient'] = args.program_generator_parameter_efficient == 1
       kwargs['output_batchnorm'] = args.rnn_output_batchnorm == 1
       kwargs['bidirectional'] = args.bidirectional == 1
@@ -576,6 +578,8 @@ def get_program_generator(args):
       kwargs['module_num_layers'] = args.module_num_layers
       kwargs['module_dim'] = args.module_dim
       kwargs['debug_every'] = args.debug_every
+      if args.model_type == 'FiLM+BoW':
+        kwargs['encoder_type'] = 'bow'
       pg = FiLMGen(**kwargs)
     else:
       pg = Seq2Seq(**kwargs)
@@ -607,8 +611,10 @@ def get_execution_engine(args):
       'classifier_batchnorm': args.classifier_batchnorm == 1,
       'classifier_dropout': args.classifier_dropout,
     }
-    if args.model_type == 'FiLM':
+    if args.model_type.startswith('FiLM'):
       kwargs['num_modules'] = args.num_modules
+      kwargs['stem_use_resnet'] = (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0')
+      kwargs['stem_resnet_fixed'] = args.model_type == 'FiLM+ResNet0'
       kwargs['stem_kernel_size'] = args.module_stem_kernel_size
       kwargs['stem_stride2_freq'] = args.module_stem_stride2_freq
       kwargs['stem_padding'] = args.module_stem_padding
@@ -766,7 +772,7 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
       programs_pred = program_generator.reinforce_sample(
                           questions_var, argmax=True)
       scores = execution_engine(feats_var, programs_pred)
-    elif args.model_type == 'FiLM':
+    elif args.model_type.startswith('FiLM'):
       programs_pred = program_generator(questions_var)
       scores = execution_engine(feats_var, programs_pred)
     elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
