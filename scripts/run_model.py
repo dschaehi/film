@@ -35,7 +35,7 @@ parser.add_argument('--program_generator', default='models/best.pt')
 parser.add_argument('--execution_engine', default='models/best.pt')
 parser.add_argument('--baseline_model', default=None)
 parser.add_argument('--model_type', default='FiLM',
-  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']))
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
 parser.add_argument('--debug_every', default=float('inf'), type=float)
 # parser.add_argument('--use_gpu', default=1, type=int)
 
