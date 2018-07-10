@@ -70,11 +70,14 @@ class FiLMGen(nn.Module):
       self.cond_feat_size = 4 * self.module_dim + 2 * self.num_modules
 
     self.encoder_embed = nn.Embedding(encoder_vocab_size, wordvec_dim)
-    self.encoder_bow_linear = nn.Linear(wordvec_dim, hidden_dim * self.num_dir)
-    self.encoder_rnn = init_rnn(self.encoder_type, wordvec_dim, hidden_dim, rnn_num_layers,
-                                dropout=rnn_dropout, bidirectional=self.bidirectional)
+    if self.encoder_type == 'bow':
+      self.encoder_bow_linear = nn.Linear(wordvec_dim, hidden_dim * self.num_dir)
+    else:
+      self.encoder_rnn = init_rnn(self.encoder_type, wordvec_dim, hidden_dim, rnn_num_layers,
+                                  dropout=rnn_dropout, bidirectional=self.bidirectional)
+    if self.decoder_type != 'linear':
     self.decoder_rnn = init_rnn(self.decoder_type, hidden_dim, hidden_dim, rnn_num_layers,
-                                dropout=rnn_dropout, bidirectional=self.bidirectional)
+                                  dropout=rnn_dropout, bidirectional=self.bidirectional)
     self.decoder_linear = nn.Linear(
       hidden_dim * self.num_dir, self.num_modules * self.cond_feat_size)
     if self.output_batchnorm:
