@@ -76,7 +76,7 @@ class FiLMGen(nn.Module):
       self.encoder_rnn = init_rnn(self.encoder_type, wordvec_dim, hidden_dim, rnn_num_layers,
                                   dropout=rnn_dropout, bidirectional=self.bidirectional)
     if self.decoder_type != 'linear':
-    self.decoder_rnn = init_rnn(self.decoder_type, hidden_dim, hidden_dim, rnn_num_layers,
+      self.decoder_rnn = init_rnn(self.decoder_type, hidden_dim, hidden_dim, rnn_num_layers,
                                   dropout=rnn_dropout, bidirectional=self.bidirectional)
     self.decoder_linear = nn.Linear(
       hidden_dim * self.num_dir, self.num_modules * self.cond_feat_size)
