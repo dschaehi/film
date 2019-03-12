@@ -28,10 +28,10 @@ class FiLM(nn.Module):
 
 class FiLMedNet(nn.Module):
   def __init__(self, vocab, feature_dim=(1024, 14, 14),
-               stem_num_layers=2,
                stem_use_resnet=False,
                stem_resnet_fixed=False,
-               resnet_model_stage = 3,
+               resnet_model_stage=3,
+               stem_num_layers=2,
                stem_batchnorm=False,
                stem_kernel_size=3,
                stem_stride=1,

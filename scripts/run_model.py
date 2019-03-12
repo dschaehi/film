@@ -125,8 +125,7 @@ def main(args):
     print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
     print('Config: ' + str(args.sw_config))
 
-    dataset = torch_util.ShapeWorldDataset(dataset=dataset,  # include_model=True
-      mode=(None if args.sw_mode == 'none' else args.sw_mode), epoch=(args.num_samples is None))
+    dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode=(None if args.sw_mode == 'none' else args.sw_mode), epoch=(args.num_samples is None))  # include_model=True
 
     loader = ShapeWorldDataLoader(dataset=dataset, batch_size=args.batch_size)  # num_workers=1
 

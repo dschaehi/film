@@ -20,8 +20,15 @@ import vr.programs
 
 class ModuleNet(nn.Module):
   def __init__(self, vocab, feature_dim=(1024, 14, 14),
+               stem_use_resnet=False,
+               stem_resnet_fixed=False,
+               resnet_model_stage=3,
                stem_num_layers=2,
                stem_batchnorm=False,
+               stem_kernel_size=3,
+               stem_stride=1,
+               stem_stride2_freq=0,
+               stem_padding=None,
                module_dim=128,
                module_residual=True,
                module_batchnorm=False,
@@ -33,16 +40,21 @@ class ModuleNet(nn.Module):
                verbose=True):
     super(ModuleNet, self).__init__()
 
-
-    self.stem = build_stem(feature_dim[0], module_dim,
-                           num_layers=stem_num_layers,
-                           with_batchnorm=stem_batchnorm)
+    self.stem = build_stem(stem_use_resnet, stem_resnet_fixed, feature_dim[0], module_dim,
+                           resnet_model_stage=resnet_model_stage, num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
+                           kernel_size=stem_kernel_size, stride=stem_stride, stride2_freq=stem_stride2_freq, padding=stem_padding)
     if verbose:
       print('Here is my stem:')
       print(self.stem)
 
+    if stem_stride2_freq > 0:
+      module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
+      module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
+    else:
+      module_H = feature_dim[1]
+      module_W = feature_dim[2]
+
     num_answers = len(vocab['answer_idx_to_token'])
-    module_H, module_W = feature_dim[1], feature_dim[2]
     self.classifier = build_classifier(module_dim, module_H, module_W, num_answers,
                                        classifier_fc_layers,
                                        classifier_proj_dim,

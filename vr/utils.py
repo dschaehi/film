@@ -43,7 +43,9 @@ def load_cpu(path):
 
 
 def load_program_generator(path, model_type='PG+EE'):
+  print(path)
   checkpoint = load_cpu(path)
+  print(checkpoint)
   kwargs = checkpoint['program_generator_kwargs']
   state = checkpoint['program_generator_state']
   if model_type == 'FiLM':

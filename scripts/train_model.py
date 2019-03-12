@@ -26,9 +26,11 @@ import numpy as np
 import h5py
 
 import vr.utils as utils
-import vr.preprocess
+from vr.preprocess import decode, encode, tokenize
+from vr.programs import list_to_prefix, list_to_str
+
 from vr.data import ClevrDataset, ClevrDataLoader
-from vr.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel
+from vr.models import ModuleNet, Seq2Seq, CnnModel, LstmModel, CnnLstmModel, CnnLstmSaModel
 from vr.models import FiLMedNet
 from vr.models import FiLMGen
 
@@ -52,15 +54,17 @@ parser.add_argument('--num_val_samples', default=None, type=int)
 parser.add_argument('--shuffle_train_data', default=1, type=int)
 
 # ShapeWorld input data (ignores all of the above)
+parser.add_argument('--sw_type', default='agreement')
 parser.add_argument('--sw_name', default=None)
 parser.add_argument('--sw_variant', default=None)
 parser.add_argument('--sw_language', default=None)
 parser.add_argument('--sw_config', default=None)
 parser.add_argument('--sw_mixer', default=0, type=int)
+parser.add_argument('--sw_features', default=0, type=int)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
-  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0'])
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA', 'FiLM+BoW', 'FiLM+ResNet1', 'FiLM+ResNet0'])
 parser.add_argument('--train_program_generator', default=1, type=int)
 parser.add_argument('--train_execution_engine', default=1, type=int)
 parser.add_argument('--baseline_train_only_rnn', default=0, type=int)
@@ -116,6 +120,18 @@ parser.add_argument('--grad_clip', default=0, type=float)  # <= 0 for no grad cl
 parser.add_argument('--debug_every', default=float('inf'), type=float)  # inf for no pdb
 parser.add_argument('--print_verbose_every', default=float('inf'), type=float)  # inf for min print
 
+# Relational Module for CNN+LSTM (https://arxiv.org/abs/1706.01427)
+# (code adapted from https://github.com/kimhc6028/relational-networks)
+parser.add_argument('--relational_module', default=0, type=int)
+parser.add_argument('--rel_module_dim', default=256, type=int)
+parser.add_argument('--rel_num_layers', default=4, type=int)
+
+# Multimodal Core options for CNN+LSTM (https://arxiv.org/abs/1809.04482)
+parser.add_argument('--multimodal_core', default=0, type=int)
+parser.add_argument('--mc_module_dim', default=256, type=int)
+parser.add_argument('--mc_num_layers', default=4, type=int)
+parser.add_argument('--mc_batchnorm', default=1, type=int)
+
 # CNN options (for baselines)
 parser.add_argument('--cnn_res_block_dim', default=128, type=int)
 parser.add_argument('--cnn_num_res_blocks', default=0, type=int)
@@ -151,7 +167,7 @@ parser.add_argument('--randomize_checkpoint_path', type=int, default=0)
 parser.add_argument('--avoid_checkpoint_override', default=0, type=int)
 parser.add_argument('--record_loss_every', default=100, type=int)
 parser.add_argument('--record_accuracy_10k_every', default=1000, type=int)
-parser.add_argument('--record_accuracy_every', default=1000, type=int)
+parser.add_argument('--record_accuracy_every', default=5000, type=int)
 parser.add_argument('--checkpoint_every', default=10000, type=int)
 parser.add_argument('--time', default=0, type=int)
 
@@ -174,42 +190,83 @@ def main(args):
 
       def __iter__(self):
         for batch in super(ShapeWorldDataLoader, self).__iter__():
-          question = batch['caption'].long()
-          image = batch['world']
-          feats = batch['world']
-          answer = batch['agreement'].long()
+          if 'caption' in batch:
+            question = batch['caption'].long()
+          else:
+            question = batch['question'].long()
+          if args.sw_features == 1:
+            image = batch['world_features']
+          else:
+            image = batch['world']
+          feats = image
+          if 'agreement' in batch:
+            answer = batch['agreement'].long()
+          else:
+            answer = batch['answer'].long()
           if 'caption_model' in batch:
             program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+          elif 'question_model' in batch:
+            program_seq = batch['question_model']
+          elif 'caption' in batch:
+            program_seq = [None]
           else:
-            program_seq = torch.IntTensor([0 for _ in batch['caption']])
+            program_seq = [None]
+          # program_seq = torch.IntTensor([0 for _ in batch['question']])
           program_json = dict()
           yield question, image, feats, answer, program_seq, program_json
 
-    dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
-      language=args.sw_language, config=args.sw_config)
+    exclude_values = ('world',) if args.sw_features == 1 else ('world_features',)
+    dataset = Dataset.create(dtype=args.sw_type, name=args.sw_name, variant=args.sw_variant,
+      language=args.sw_language, config=args.sw_config, exclude_values=exclude_values)
     print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
     print('Config: ' + str(args.sw_config))
 
-    if args.program_generator_start_from is None:
-      question_token_to_idx = {
-        word: index + 2 if index > 0 else 0
-        for word, index in dataset.vocabularies['language'].items()
-      }
-      question_token_to_idx['<NULL>'] = 0
-      question_token_to_idx['<START>'] = 1
-      question_token_to_idx['<END>'] = 2
-      vocab = dict(
-        question_token_to_idx=question_token_to_idx,
-        program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
-        answer_token_to_idx={'false': 0, 'true': 1}
-      )
+    if args.program_generator_start_from is None and args.execution_engine_start_from is None and args.baseline_start_from is None:
+      if args.sw_name.startswith('clevr'):
+        # from vocab.json
+        question_token_to_idx = {
+          word: index + 2 if index > 0 else 0
+          for word, index in dataset.vocabularies['language'].items()
+     }
+        question_token_to_idx['<NULL>'] = 0
+        question_token_to_idx['<START>'] = 1
+        question_token_to_idx['<END>'] = 2
+        program_token_to_idx = {"<NULL>": 0, "<START>": 1, "<END>": 2, "<UNK>": 3, "count": 4, "equal_color": 5, "equal_integer": 6, "equal_material": 7, "equal_shape": 8, "equal_size": 9, "exist": 10, "filter_color[blue]": 11, "filter_color[brown]": 12, "filter_color[cyan]": 13, "filter_color[gray]": 14, "filter_color[green]": 15, "filter_color[purple]": 16, "filter_color[red]": 17, "filter_color[yellow]": 18, "filter_material[metal]": 19, "filter_material[rubber]": 20, "filter_shape[cube]": 21, "filter_shape[cylinder]": 22, "filter_shape[sphere]": 23, "filter_size[large]": 24, "filter_size[small]": 25, "greater_than": 26, "intersect": 27, "less_than": 28, "query_color": 29, "query_material": 30, "query_shape": 31, "query_size": 32, "relate[behind]": 33, "relate[front]": 34, "relate[left]": 35, "relate[right]": 36, "same_color": 37, "same_material": 38, "same_shape": 39, "same_size": 40, "scene": 41, "union": 42, "unique": 43}
+        answer_token_to_idx = {"<NULL>": 0, "<START>": 1, "<END>": 2, "<UNK>": 3, "0": 4, "1": 5, "10": 6, "2": 7, "3": 8, "4": 9, "5": 10, "6": 11, "7": 12, "8": 13, "9": 14, "blue": 15, "brown": 16, "cube": 17, "cyan": 18, "cylinder": 19, "gray": 20, "green": 21, "large": 22, "metal": 23, "no": 24, "purple": 25, "red": 26, "rubber": 27, "small": 28, "sphere": 29, "yellow": 30, "yes": 31}
+        vocab = dict(
+          question_token_to_idx=question_token_to_idx,
+          program_token_to_idx=program_token_to_idx,
+          answer_token_to_idx=answer_token_to_idx
+        )
+      else:
+        question_token_to_idx = {
+          word: index + 2 if index > 0 else 0
+          for word, index in dataset.vocabularies['language'].items()
+        }
+        question_token_to_idx['<NULL>'] = 0
+        question_token_to_idx['<START>'] = 1
+        question_token_to_idx['<END>'] = 2
+        vocab = dict(
+          question_token_to_idx=question_token_to_idx,
+          program_token_to_idx={'<NULL>': 0, '<START>': 1, '<END>': 2},  # missing!!!
+          answer_token_to_idx={'false': 0, 'true': 1}
+        )
       with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
         json.dump(vocab, filehandle)
 
     else:
-      with open(args.program_generator_start_from + '.vocab', 'r') as filehandle:
-        vocab = json.load(filehandle)
+      if args.program_generator_start_from is not None:
+        with open(args.program_generator_start_from + '.vocab', 'r') as filehandle:
+          vocab = json.load(filehandle)
+      elif args.execution_engine_start_from is not None:
+        with open(args.execution_engine_start_from + '.vocab', 'r') as filehandle:
+          vocab = json.load(filehandle)
+      elif args.baseline_start_from is not None:
+        with open(args.baseline_start_from + '.vocab', 'r') as filehandle:
+          vocab = json.load(filehandle)
       question_token_to_idx = vocab['question_token_to_idx']
+      program_token_to_idx = vocab['program_token_to_idx']
+      answer_token_to_idx = vocab['answer_token_to_idx']
       index = len(question_token_to_idx)
       for word in dataset.vocabularies['language']:
         if word not in question_token_to_idx:
@@ -218,20 +275,50 @@ def main(args):
       with open(args.checkpoint_path + '.vocab', 'w') as filehandle:
         json.dump(vocab, filehandle)
 
-    args.feature_dim = ','.join(str(n) for n in reversed(dataset.world_shape()))
+    if args.sw_features == 1:
+      shape = dataset.vector_shape(value_name='world_features')
+    else:
+      shape = dataset.world_shape()
+    args.feature_dim = '{},{},{}'.format(shape[2], shape[0], shape[1])
     args.vocab_json = args.checkpoint_path + '.vocab'
 
-    train_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='train')  # , include_model=True)
-    train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # num_workers=1
+    include_model = args.model_type in ('PG', 'EE', 'PG+EE')
+    if include_model:
+
+      def preprocess(model):
+        program_prefix = list_to_prefix(model['program'])
+        program_str = list_to_str(program_prefix)
+        program_tokens = tokenize(program_str)
+        program_encoded = encode(program_tokens, program_token_to_idx)
+        program_encoded += [program_token_to_idx['<NULL>'] for _ in range(27 - len(program_encoded))]
+        return np.asarray(program_encoded, dtype=np.int64)
+
+      if args.sw_name.startswith('clevr'):
+        preprocessing = dict(question_model=preprocess)
+      else:
+        preprocessing = dict(caption_model=preprocess)
+    else:
+      preprocessing = None
+
+    train_dataset = torch_util.ShapeWorldDataset(
+      dataset=dataset, mode='train', include_model=include_model, preprocessing=preprocessing
+    )
+    train_loader = ShapeWorldDataLoader(dataset=train_dataset, batch_size=args.batch_size)  # , num_workers=args.loader_num_workers))
 
     if args.sw_mixer == 1:
       val_loader = list()
       for d in dataset.datasets:
-        val_dataset = torch_util.ShapeWorldDataset(dataset=d, mode='validation', epoch=(args.num_val_samples is None))
-        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # num_workers=1
+        val_dataset = torch_util.ShapeWorldDataset(
+          dataset=d, mode='validation', include_model=include_model, epoch=(args.num_val_samples is None),
+          preprocessing=preprocessing
+        )
+        val_loader.append(ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size))  # , num_workers=args.loader_num_workers))
     else:
-      val_dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode='validation', epoch=(args.num_val_samples is None))
-      val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # num_workers=1
+      val_dataset = torch_util.ShapeWorldDataset(
+        dataset=dataset, mode='validation', include_model=include_model, epoch=(args.num_val_samples is None),
+        preprocessing=preprocessing
+      )
+      val_loader = ShapeWorldDataLoader(dataset=val_dataset, batch_size=args.batch_size)  # , num_workers=args.loader_num_workers))
 
     train_loop(args, train_loader, val_loader)
 
@@ -309,7 +396,7 @@ def train_loop(args, train_loader, val_loader):
                                 weight_decay=args.weight_decay)
     print('Here is the conditioned network:')
     print(execution_engine)
-  if args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
+  if args.model_type in ['CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
     baseline_model, baseline_kwargs = get_baseline_model(args)
     params = baseline_model.parameters()
     if args.baseline_train_only_rnn == 1:
@@ -366,9 +453,11 @@ def train_loop(args, train_loader, val_loader):
         batch = next(train_loader_iter)
       except StopIteration:
         break
-    # for batch in train_loader:
       t += 1
-      questions, _, feats, answers, programs, _ = batch
+      if (args.sw_name is None and args.sw_config is None) or args.sw_features == 1:
+        questions, _, feats, answers, programs, _ = batch
+      else:
+        questions, feats, _, answers, programs, _ = batch
       if isinstance(questions, list):
         questions = questions[0]
       if torch.cuda.is_available():
@@ -398,7 +487,7 @@ def train_loop(args, train_loader, val_loader):
         loss = loss_fn(scores, answers_var)
         loss.backward()
         ee_optimizer.step()
-      elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
+      elif args.model_type in ['CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
         baseline_optimizer.zero_grad()
         baseline_model.zero_grad()
         scores = baseline_model(questions_var, feats_var)
@@ -600,8 +689,13 @@ def get_execution_engine(args):
     kwargs = {
       'vocab': vocab,
       'feature_dim': parse_int_list(args.feature_dim),
-      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_use_resnet': (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0'),
+      'stem_resnet_fixed': args.model_type == 'FiLM+ResNet0',
       'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
       'module_dim': args.module_dim,
       'module_residual': args.module_residual == 1,
       'module_batchnorm': args.module_batchnorm == 1,
@@ -613,11 +707,6 @@ def get_execution_engine(args):
     }
     if args.model_type.startswith('FiLM'):
       kwargs['num_modules'] = args.num_modules
-      kwargs['stem_use_resnet'] = (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0')
-      kwargs['stem_resnet_fixed'] = args.model_type == 'FiLM+ResNet0'
-      kwargs['stem_kernel_size'] = args.module_stem_kernel_size
-      kwargs['stem_stride2_freq'] = args.module_stem_stride2_freq
-      kwargs['stem_padding'] = args.module_stem_padding
       kwargs['module_num_layers'] = args.module_num_layers
       kwargs['module_batchnorm_affine'] = args.module_batchnorm_affine == 1
       kwargs['module_dropout'] = args.module_dropout
@@ -645,6 +734,27 @@ def get_baseline_model(args):
   vocab = utils.load_vocab(args.vocab_json)
   if args.baseline_start_from is not None:
     model, kwargs = utils.load_baseline(args.baseline_start_from)
+  elif args.model_type == 'CNN':
+    kwargs = {
+      'vocab': vocab,
+      'feature_dim': parse_int_list(args.feature_dim),
+      'stem_module_dim': args.module_dim,
+      'stem_use_resnet': (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0'),
+      'stem_resnet_fixed': args.model_type == 'FiLM+ResNet0',
+      'stem_num_layers': args.module_stem_num_layers,
+      'stem_batchnorm': args.module_stem_batchnorm == 1,
+      'stem_kernel_size': args.module_stem_kernel_size,
+      'stem_stride2_freq': args.module_stem_stride2_freq,
+      'stem_padding': args.module_stem_padding,
+      'cnn_num_res_blocks': args.cnn_num_res_blocks,
+      'cnn_res_block_dim': args.cnn_res_block_dim,
+      'cnn_proj_dim': args.cnn_proj_dim,
+      'cnn_pooling': args.cnn_pooling,
+      'fc_dims': parse_int_list(args.classifier_fc_dims),
+      'fc_use_batchnorm': args.classifier_batchnorm == 1,
+      'fc_dropout': args.classifier_dropout,
+    }
+    model = CnnModel(**kwargs)
   elif args.model_type == 'LSTM':
     kwargs = {
       'vocab': vocab,
@@ -666,11 +776,23 @@ def get_baseline_model(args):
       'rnn_dropout': args.rnn_dropout,
       'feature_dim': parse_int_list(args.feature_dim),
       'stem_module_dim': args.module_dim,
+      'stem_use_resnet': (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0'),
+      'stem_resnet_fixed': args.model_type == 'FiLM+ResNet0',
       'stem_num_layers': args.module_stem_num_layers,
       'stem_batchnorm': args.module_stem_batchnorm == 1,
       'stem_kernel_size': args.module_stem_kernel_size,
       'stem_stride2_freq': args.module_stem_stride2_freq,
       'stem_padding': args.module_stem_padding,
+      # https://arxiv.org/abs/1706.01427
+      'relational_module': args.relational_module == 1,
+      'rel_module_dim': args.rel_module_dim,
+      'rel_num_layers': args.rel_num_layers,
+      # https://arxiv.org/abs/1809.04482
+      'multimodal_core': args.multimodal_core == 1,
+      'mc_module_dim': args.mc_module_dim,
+      'mc_num_layers': args.mc_num_layers,
+      'mc_batchnorm': args.mc_batchnorm == 1,
+      # Default CNN+LSTM
       'cnn_num_res_blocks': args.cnn_num_res_blocks,
       'cnn_res_block_dim': args.cnn_res_block_dim,
       'cnn_proj_dim': args.cnn_proj_dim,
@@ -689,6 +811,8 @@ def get_baseline_model(args):
       'rnn_dropout': args.rnn_dropout,
       'feature_dim': parse_int_list(args.feature_dim),
       'stem_module_dim': args.module_dim,
+      'stem_use_resnet': (args.model_type == 'FiLM+ResNet1' or args.model_type == 'FiLM+ResNet0'),
+      'stem_resnet_fixed': args.model_type == 'FiLM+ResNet0',
       'stem_num_layers': args.module_stem_num_layers,
       'stem_batchnorm': args.module_stem_batchnorm == 1,
       'stem_kernel_size': args.module_stem_kernel_size,
@@ -701,7 +825,7 @@ def get_baseline_model(args):
       'fc_dropout': args.classifier_dropout,
     }
     model = CnnLstmSaModel(**kwargs)
-  if model.rnn.token_to_idx != vocab['question_token_to_idx']:
+  if args.model_type != 'CNN' and model.rnn.token_to_idx != vocab['question_token_to_idx']:
     # Make sure new vocab is superset of old
     for k, v in model.rnn.token_to_idx.items():
       assert k in vocab['question_token_to_idx']
@@ -736,7 +860,11 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
   set_mode('eval', [program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
   for batch in loader:
-    questions, _, feats, answers, programs, _ = batch
+    if (args.sw_name is None and args.sw_config is None) or args.sw_features == 1:
+      questions, _, feats, answers, programs, _ = batch
+    else:
+      questions, feats, _, answers, programs, _ = batch
+
     if isinstance(questions, list):
       questions = questions[0]
 
@@ -761,21 +889,20 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
           program_pred = program_generator.sample(Variable(questions[i:i+1].cuda(), volatile=True))
         else:
           program_pred = program_generator.sample(Variable(questions[i:i+1].cpu(), volatile=True))
-        program_pred_str = vr.preprocess.decode(program_pred, vocab['program_idx_to_token'])
-        program_str = vr.preprocess.decode(programs[i], vocab['program_idx_to_token'])
+        program_pred_str = decode(program_pred, vocab['program_idx_to_token'])
+        program_str = decode(programs[i], vocab['program_idx_to_token'])
         if program_pred_str == program_str:
           num_correct += 1
         num_samples += 1
     elif args.model_type == 'EE':
       scores = execution_engine(feats_var, programs_var)
     elif args.model_type == 'PG+EE':
-      programs_pred = program_generator.reinforce_sample(
-                          questions_var, argmax=True)
+      programs_pred = program_generator.reinforce_sample(questions_var, argmax=True)
       scores = execution_engine(feats_var, programs_pred)
     elif args.model_type.startswith('FiLM'):
       programs_pred = program_generator(questions_var)
       scores = execution_engine(feats_var, programs_pred)
-    elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
+    elif args.model_type in ['CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
       scores = baseline_model(questions_var, feats_var)
 
     if scores is not None:

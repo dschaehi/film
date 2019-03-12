@@ -11,7 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 
-from vr.models.layers import init_modules, build_stem, ResidualBlock
+from vr.models.layers import init_modules, build_stem, build_relational_module, build_multimodal_core, build_classifier, ResidualBlock
+from vr.models.filmed_net import coord_map
 from vr.embedding import expand_embedding_vocab
 
 
@@ -133,6 +134,46 @@ def build_mlp(input_dim, hidden_dims, output_dim,
   return nn.Sequential(*layers)
 
 
+class CnnModel(nn.Module):
+  def __init__(self, vocab,
+               feature_dim=(1024, 14, 14), stem_module_dim=128,
+               stem_use_resnet=False, stem_resnet_fixed=False, resnet_model_stage=3,
+               stem_num_layers=2, stem_batchnorm=False, stem_kernel_size=3,
+               stem_stride=1, stem_stride2_freq=0, stem_padding=None,
+               cnn_res_block_dim=128, cnn_num_res_blocks=0, cnn_proj_dim=512, cnn_pooling='maxpool2',
+               fc_dims=(1024,), fc_use_batchnorm=False, fc_dropout=0):
+    super(CnnModel, self).__init__()
+    self.stem = build_stem(stem_use_resnet, stem_resnet_fixed, feature_dim[0], stem_module_dim,
+                           resnet_model_stage=resnet_model_stage, num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
+                           kernel_size=stem_kernel_size, stride=stem_stride, stride2_freq=stem_stride2_freq, padding=stem_padding)
+
+    if stem_stride2_freq > 0:
+      module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
+      module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
+    else:
+      module_H = feature_dim[1]
+      module_W = feature_dim[2]
+
+    self.cnn, (C, H, W) = build_cnn(
+      feat_dim=(stem_module_dim, module_H, module_W), res_block_dim=cnn_res_block_dim,
+      num_res_blocks=cnn_num_res_blocks, proj_dim=cnn_proj_dim, pooling=cnn_pooling
+    )
+    module_C = C * H * W
+
+    self.classifier = build_classifier(
+      module_C=module_C, module_H=None, module_W=None, num_answers=len(vocab['answer_token_to_idx']),
+      fc_dims=fc_dims, proj_dim=None, downsample=None, with_batchnorm=fc_use_batchnorm, dropout=fc_dropout
+    )
+
+  def forward(self, questions, feats):
+    feats = self.stem(feats)
+    N, C, H, W = feats.size()
+    feats = self.cnn(feats)
+    feats = feats.view(N, -1)
+    scores = self.classifier(feats)
+    return scores
+
+
 class LstmModel(nn.Module):
   def __init__(self, vocab,
                rnn_wordvec_dim=300, rnn_dim=256, rnn_num_layers=2, rnn_dropout=0,
@@ -147,14 +188,11 @@ class LstmModel(nn.Module):
     }
     self.rnn = LstmEncoder(**rnn_kwargs)
 
-    classifier_kwargs = {
-      'input_dim': rnn_dim,
-      'hidden_dims': fc_dims,
-      'output_dim': len(vocab['answer_token_to_idx']),
-      'use_batchnorm': fc_use_batchnorm,
-      'dropout': fc_dropout,
-    }
-    self.classifier = build_mlp(**classifier_kwargs)
+    self.classifier = build_classifier(
+      module_C=rnn_dim, module_H=None, module_W=None,
+      num_answers=len(vocab['answer_token_to_idx']), fc_dims=fc_dims, proj_dim=None,
+      downsample=None, with_batchnorm=fc_use_batchnorm, dropout=fc_dropout
+    )
 
   def forward(self, questions, feats):
     q_feats = self.rnn(questions)
@@ -166,9 +204,12 @@ class CnnLstmModel(nn.Module):
   def __init__(self, vocab,
                rnn_wordvec_dim=300, rnn_dim=256, rnn_num_layers=2, rnn_dropout=0,
                feature_dim=(1024, 14, 14), stem_module_dim=128,
+               stem_use_resnet=False, stem_resnet_fixed=False, resnet_model_stage=3,
                stem_num_layers=2, stem_batchnorm=False, stem_kernel_size=3,
-               stem_stride2_freq=0, stem_padding=None, cnn_res_block_dim=128,
-               cnn_num_res_blocks=0, cnn_proj_dim=512, cnn_pooling='maxpool2',
+               stem_stride=1, stem_stride2_freq=0, stem_padding=None,
+               relational_module=False, rel_module_dim=256, rel_num_layers=4,
+               multimodal_core=False, mc_module_dim=256, mc_num_layers=4, mc_batchnorm=True,
+               cnn_res_block_dim=128, cnn_num_res_blocks=0, cnn_proj_dim=512, cnn_pooling='maxpool2',
                fc_dims=(1024,), fc_use_batchnorm=False, fc_dropout=0):
     super(CnnLstmModel, self).__init__()
     rnn_kwargs = {
@@ -180,16 +221,9 @@ class CnnLstmModel(nn.Module):
     }
     self.rnn = LstmEncoder(**rnn_kwargs)
 
-    stem_kwargs = {
-      'feature_dim': feature_dim[0],
-      'module_dim': stem_module_dim,
-      'num_layers': stem_num_layers,
-      'with_batchnorm': stem_batchnorm,
-      'kernel_size': stem_kernel_size,
-      'stride2_freq': stem_stride2_freq,
-      'padding': stem_padding
-    }
-    self.stem = build_stem(**stem_kwargs)
+    self.stem = build_stem(stem_use_resnet, stem_resnet_fixed, feature_dim[0], stem_module_dim,
+                           resnet_model_stage=resnet_model_stage, num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
+                           kernel_size=stem_kernel_size, stride=stem_stride, stride2_freq=stem_stride2_freq, padding=stem_padding)
 
     if stem_stride2_freq > 0:
       module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
@@ -198,32 +232,72 @@ class CnnLstmModel(nn.Module):
       module_H = feature_dim[1]
       module_W = feature_dim[2]
 
-    cnn_kwargs = {
-      'feat_dim': (stem_module_dim, module_H, module_W),
-      'res_block_dim': cnn_res_block_dim,
-      'num_res_blocks': cnn_num_res_blocks,
-      'proj_dim': cnn_proj_dim,
-      'pooling': cnn_pooling,
-    }
-    self.cnn, (C, H, W) = build_cnn(**cnn_kwargs)
+    assert not relational_module or not multimodal_core
+    self.relational_module = relational_module
+    self.multimodal_core = multimodal_core
 
-    classifier_kwargs = {
-      'input_dim': C * H * W + rnn_dim,
-      'hidden_dims': fc_dims,
-      'output_dim': len(vocab['answer_token_to_idx']),
-      'use_batchnorm': fc_use_batchnorm,
-      'dropout': fc_dropout,
-    }
-    self.classifier = build_mlp(**classifier_kwargs)
+    if self.relational_module:
+      # https://arxiv.org/abs/1706.01427
+      self.coords = coord_map((module_H, module_W))
+      self.rel = build_relational_module(
+        feature_dim=((stem_module_dim + 2) * 2 + rnn_dim), module_dim=rel_module_dim,
+        num_layers=rel_num_layers
+      )
+      module_C = rel_module_dim
+
+    elif self.multimodal_core:
+      # https://arxiv.org/abs/1809.04482
+      self.mc = build_multimodal_core(
+        feature_dim=(stem_module_dim + rnn_dim), module_dim=mc_module_dim, num_layers=mc_num_layers,
+        with_batchnorm=mc_batchnorm
+      )
+      module_C = mc_module_dim
+
+    else:
+      self.cnn, (C, H, W) = build_cnn(
+        feat_dim=(stem_module_dim, module_H, module_W), res_block_dim=cnn_res_block_dim,
+        num_res_blocks=cnn_num_res_blocks, proj_dim=cnn_proj_dim, pooling=cnn_pooling
+      )
+      module_C = C * H * W + rnn_dim
+
+    self.classifier = build_classifier(
+      module_C=module_C, module_H=None, module_W=None, num_answers=len(vocab['answer_token_to_idx']),
+      fc_dims=fc_dims, proj_dim=None, downsample=None, with_batchnorm=fc_use_batchnorm, dropout=fc_dropout
+    )
 
   def forward(self, questions, feats):
-    N = questions.size(0)
-    assert N == feats.size(0)
-    q_feats = self.rnn(questions)
     feats = self.stem(feats)
-    img_feats = self.cnn(feats)
-    cat_feats = torch.cat([q_feats, img_feats.view(N, -1)], 1)
-    scores = self.classifier(cat_feats)
+    q_feats = self.rnn(questions)
+    N, C, H, W = feats.size()
+    N1, Q = q_feats.size()
+    assert N == N1
+
+    if self.relational_module:
+      # Code adapted from https://github.com/kimhc6028/relational-networks
+      feats = torch.cat([feats, self.coords.unsqueeze(0).repeat(N, 1, 1, 1)], 1)
+      feats = feats.view(N, C + 2, H * W).permute(0, 2, 1)
+      feats1 = feats.unsqueeze(1)
+      feats1 = feats1.repeat(1, H * W, 1, 1)
+      feats2 = torch.cat([feats, q_feats.unsqueeze(1).repeat(1, H * W, 1)], 2)
+      feats2 = feats2.unsqueeze(2)
+      feats2 = feats2.repeat(1, 1, H * W, 1)
+      feats = torch.cat([feats1, feats2], 3)
+      feats = feats.view(N * H * W * H * W, (C + 2) * 2 + Q)
+      feats = self.rel(feats)
+      feats = feats.view(N, H * W * H * W, feats.size(1))
+      feats = feats.sum(1)
+
+    elif self.multimodal_core:
+      q_feats = q_feats.unsqueeze(2).unsqueeze(3).repeat(1, 1, H, W)
+      feats = torch.cat([feats, q_feats], 1)
+      feats = self.mc(feats)
+      feats = feats.sum(3).sum(2)
+
+    else:
+      feats = self.cnn(feats)
+      feats = torch.cat([q_feats, feats.view(N, -1)], 1)
+
+    scores = self.classifier(feats)
     return scores
 
 
@@ -231,8 +305,9 @@ class CnnLstmSaModel(nn.Module):
   def __init__(self, vocab,
                rnn_wordvec_dim=300, rnn_dim=256, rnn_num_layers=2, rnn_dropout=0,
                feature_dim=(1024, 14, 14), stem_module_dim=128,
+               stem_use_resnet=False, stem_resnet_fixed=False, resnet_model_stage=3,
                stem_num_layers=2, stem_batchnorm=False, stem_kernel_size=3,
-               stem_stride2_freq=0, stem_padding=None,
+               stem_stride=1, stem_stride2_freq=0, stem_padding=None,
                stacked_attn_dim=512, num_stacked_attn=2,
                fc_use_batchnorm=False, fc_dropout=0, fc_dims=(1024,)):
     super(CnnLstmSaModel, self).__init__()
@@ -245,16 +320,16 @@ class CnnLstmSaModel(nn.Module):
     }
     self.rnn = LstmEncoder(**rnn_kwargs)
 
-    stem_kwargs = {
-      'feature_dim': feature_dim[0],
-      'module_dim': stem_module_dim,
-      'num_layers': stem_num_layers,
-      'with_batchnorm': stem_batchnorm,
-      'kernel_size': stem_kernel_size,
-      'stride2_freq': stem_stride2_freq,
-      'padding': stem_padding
-    }
-    self.stem = build_stem(**stem_kwargs)
+    self.stem = build_stem(stem_use_resnet, stem_resnet_fixed, feature_dim[0], stem_module_dim,
+                           resnet_model_stage=resnet_model_stage, num_layers=stem_num_layers, with_batchnorm=stem_batchnorm,
+                           kernel_size=stem_kernel_size, stride=stem_stride, stride2_freq=stem_stride2_freq, padding=stem_padding)
+
+    if stem_stride2_freq > 0:
+      module_H = feature_dim[1] // (2 ** (stem_num_layers // stem_stride2_freq))
+      module_W = feature_dim[2] // (2 ** (stem_num_layers // stem_stride2_freq))
+    else:
+      module_H = feature_dim[1]
+      module_W = feature_dim[2]
 
     self.image_proj = nn.Conv2d(stem_module_dim, rnn_dim, kernel_size=1, padding=0)
     self.stacked_attns = []
@@ -263,14 +338,11 @@ class CnnLstmSaModel(nn.Module):
       self.stacked_attns.append(sa)
       self.add_module('stacked-attn-%d' % i, sa)
 
-    classifier_args = {
-      'input_dim': rnn_dim,
-      'hidden_dims': fc_dims,
-      'output_dim': len(vocab['answer_token_to_idx']),
-      'use_batchnorm': fc_use_batchnorm,
-      'dropout': fc_dropout,
-    }
-    self.classifier = build_mlp(**classifier_args)
+    self.classifier = build_classifier(
+      module_C=rnn_dim, module_H=None, module_W=None,
+      num_answers=len(vocab['answer_token_to_idx']), fc_dims=fc_dims, proj_dim=None,
+      downsample=None, with_batchnorm=fc_use_batchnorm, dropout=fc_dropout
+    )
     init_modules(self.modules(), init='normal')
 
   def forward(self, questions, feats):

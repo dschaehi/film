@@ -175,6 +175,7 @@ class Seq2Seq(nn.Module):
     h, c = None, None
     self.multinomial_outputs = []
     self.multinomial_probs = []
+    self.multinomial_distr = []
     for t in range(T):
       # logprobs is N x 1 x V
       logprobs, h, c = self.decoder(encoded, cur_input, h0=h, c0=c)
@@ -183,13 +184,17 @@ class Seq2Seq(nn.Module):
       if argmax:
         _, cur_output = probs.max(1)
       else:
-        cur_output = probs.multinomial() # Now N x 1
+        # cur_output = probs.multinomial() # Now N x 1
+        distr = torch.distributions.Categorical(probs)
+        self.multinomial_distr.append(distr)
+        cur_output = distr.sample()
+      cur_output = cur_output.view(N, 1)
       self.multinomial_outputs.append(cur_output)
       self.multinomial_probs.append(probs)
       cur_output_data = cur_output.data.cpu()
       not_done = logical_not(done)
       y[:, t][not_done] = cur_output_data[not_done]
-      done = logical_or(done, cur_output_data.cpu() == self.END)
+      done = logical_or(done, cur_output_data.squeeze(dim=1).cpu() == self.END)
       cur_input = cur_output
       if done.sum() == N:
         break
@@ -213,8 +218,10 @@ class Seq2Seq(nn.Module):
         mask = Variable(output_mask[:, t])
         probs.register_hook(gen_hook(mask))
 
-    for sampled_output in self.multinomial_outputs:
-      sampled_output.reinforce(reward)
+    for n, sampled_output in enumerate(self.multinomial_outputs):
+      # sampled_output.reinforce(reward)
+      log_prob = self.multinomial_distr[n].log_prob(sampled_output.squeeze(dim=1))
+      self.multinomial_outputs[n] = (-log_prob * Variable(reward)).sum()
       grad_output.append(None)
     torch.autograd.backward(self.multinomial_outputs, grad_output, retain_variables=True)
 

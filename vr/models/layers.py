@@ -65,12 +65,18 @@ class GlobalAveragePool(nn.Module):
     return x.view(N, C, -1).mean(2).squeeze(2)
 
 
+class GlobalSumPool(nn.Module):
+  def forward(self, x):
+    N, C = x.size(0), x.size(1)
+    return x.view(N, C, -1).sum(2).squeeze(2)
+
+
 class Flatten(nn.Module):
   def forward(self, x):
     return x.view(x.size(0), -1)
 
 
-def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_stage = 3, num_layers=2, with_batchnorm=True,
+def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_stage=3, num_layers=2, with_batchnorm=True,
                kernel_size=3, stride=1, stride2_freq=0, padding=None):
   if use_resnet:
     if not hasattr(torchvision.models, 'resnet101'):
@@ -123,35 +129,61 @@ def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_s
   return nn.Sequential(*layers)
 
 
+def build_relational_module(feature_dim, module_dim=256, num_layers=4):
+  layers = []
+  prev_dim = feature_dim
+  for i in range(num_layers):
+    layers.append(nn.Linear(prev_dim, module_dim))
+    layers.append(nn.ReLU(inplace=True))
+    prev_dim = module_dim
+  return nn.Sequential(*layers)
+
+
+def build_multimodal_core(feature_dim, module_dim=256, num_layers=4, with_batchnorm=True):
+  layers = []
+  if with_batchnorm:
+    layers.append(nn.BatchNorm2d(feature_dim))
+  prev_dim = feature_dim
+  for i in range(num_layers):
+    layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=1, stride=1))
+    layers.append(nn.ReLU(inplace=True))
+    prev_dim = module_dim
+  return nn.Sequential(*layers)
+
+
 def build_classifier(module_C, module_H, module_W, num_answers,
                      fc_dims=[], proj_dim=None, downsample='maxpool2',
                      with_batchnorm=True, dropout=0):
   layers = []
-  prev_dim = module_C * module_H * module_W
+  if module_H is None and module_W is None:
+    module_H = module_W = 1
   if proj_dim is not None and proj_dim > 0:
     layers.append(nn.Conv2d(module_C, proj_dim, kernel_size=1))
     if with_batchnorm:
       layers.append(nn.BatchNorm2d(proj_dim))
     layers.append(nn.ReLU(inplace=True))
-    prev_dim = proj_dim * module_H * module_W
-  if 'maxpool' in downsample or 'avgpool' in downsample:
+    module_C = proj_dim
+  if downsample is not None and ('maxpool' in downsample or 'avgpool' in downsample):
     pool = nn.MaxPool2d if 'maxpool' in downsample else nn.AvgPool2d
     if 'full' in downsample:
-      if module_H != module_W:
-        assert(NotImplementedError)
-      pool_size = module_H
+      # if module_H != module_W:
+      #   raise NotImplementedError
+      pool_size = (module_H, module_W)
     else:
-      pool_size = int(downsample[-1])
+      pool_size = (int(downsample[-1]), int(downsample[-1]))
     # Note: Potentially sub-optimal padding for non-perfectly aligned pooling
-    padding = 0 if ((module_H % pool_size == 0) and (module_W % pool_size == 0)) else 1
+    padding = 0 if ((module_H % pool_size[0] == 0) and (module_W % pool_size[1] == 0)) else 1
     layers.append(pool(kernel_size=pool_size, stride=pool_size, padding=padding))
-    prev_dim = proj_dim * math.ceil(module_H / pool_size) * math.ceil(module_W / pool_size)
+    module_H = math.ceil(module_H / pool_size[0])
+    module_W = math.ceil(module_W / pool_size[1])
   if downsample == 'aggressive':
     layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
     layers.append(nn.AvgPool2d(kernel_size=module_H // 2, stride=module_W // 2))
-    prev_dim = proj_dim
+    module_H = module_W = 1
     fc_dims = []  # No FC layers here
-  layers.append(Flatten())
+  if downsample is not None:
+    layers.append(Flatten())
+  prev_dim = module_C * module_H * module_W
   for next_dim in fc_dims:
     layers.append(nn.Linear(prev_dim, next_dim))
     if with_batchnorm:
