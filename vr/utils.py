@@ -11,9 +11,10 @@ import ipdb as pdb
 import json
 import torch
 
-from vr.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel
+from vr.models import ModuleNet, Seq2Seq, CnnModel, LstmModel, CnnLstmModel, CnnLstmSaModel
 from vr.models import FiLMedNet
 from vr.models import FiLMGen
+from vr.programs import get_num_inputs
 
 def invert_dict(d):
   return {v: k for k, v in d.items()}
@@ -22,6 +23,9 @@ def invert_dict(d):
 def load_vocab(path):
   with open(path, 'r') as f:
     vocab = json.load(f)
+    if 'program_token_num_inputs' not in vocab:
+      vocab['program_token_num_inputs'] = {token: get_num_inputs(token) for token in vocab['program_token_to_idx']}
+    assert sorted(vocab['program_token_num_inputs']) == sorted(vocab['program_token_to_idx'])
     vocab['question_idx_to_token'] = invert_dict(vocab['question_token_to_idx'])
     vocab['program_idx_to_token'] = invert_dict(vocab['program_token_to_idx'])
     vocab['answer_idx_to_token'] = invert_dict(vocab['answer_token_to_idx'])
@@ -43,9 +47,7 @@ def load_cpu(path):
 
 
 def load_program_generator(path, model_type='PG+EE'):
-  print(path)
   checkpoint = load_cpu(path)
-  print(checkpoint)
   kwargs = checkpoint['program_generator_kwargs']
   state = checkpoint['program_generator_state']
   if model_type == 'FiLM':
@@ -78,6 +80,7 @@ def load_execution_engine(path, verbose=True, model_type='PG+EE'):
 
 def load_baseline(path):
   model_cls_dict = {
+    'CNN': CnnModel,
     'LSTM': LstmModel,
     'CNN+LSTM': CnnLstmModel,
     'CNN+LSTM+SA': CnnLstmSaModel,

@@ -70,17 +70,24 @@ class ModuleNet(nn.Module):
     self.timing = False
 
     self.function_modules = {}
-    self.function_modules_num_inputs = {}
+    self.function_modules_num_inputs = dict(vocab['program_token_num_inputs'])
     self.vocab = vocab
+    self.scene = None
     for fn_str in vocab['program_token_to_idx']:
-      num_inputs = vr.programs.get_num_inputs(fn_str)
-      self.function_modules_num_inputs[fn_str] = num_inputs
-      if fn_str == 'scene' or num_inputs == 1:
+      # num_inputs = vr.programs.get_num_inputs(fn_str)
+      # self.function_modules_num_inputs[fn_str] = num_inputs
+      num_inputs = self.function_modules_num_inputs[fn_str]
+      if num_inputs == 0 and self.scene is None:
+        self.scene = fn_str
+      elif fn_str == 'scene':
+        self.scene = fn_str
+      if num_inputs == 0 or num_inputs == 1:
+      # if fn_str == 'scene' or num_inputs == 1:
         mod = ResidualBlock(module_dim,
                 with_residual=module_residual,
                 with_batchnorm=module_batchnorm)
-      elif num_inputs == 2:
-        mod = ConcatBlock(module_dim,
+      elif num_inputs >= 2:
+        mod = ConcatBlock(num_inputs, module_dim,
                 with_residual=module_residual,
                 with_batchnorm=module_batchnorm)
       self.add_module(fn_str, mod)
@@ -124,9 +131,12 @@ class ModuleNet(nn.Module):
       for j, f in enumerate(program[i]):
         f_str = vr.programs.function_to_str(f)
         module = self.function_modules[f_str]
-        if f_str == 'scene':
+        # if f_str == 'scene':
+        num_inputs = self.function_modules_num_inputs[f_str]
+        if num_inputs == 0:
           module_inputs = [feats[i:i+1]]
         else:
+          assert len(f['inputs']) == num_inputs
           module_inputs = [module_outputs[j] for j in f['inputs']]
         module_outputs.append(module(*module_inputs))
         if self.save_module_outputs:
@@ -143,10 +153,10 @@ class ModuleNet(nn.Module):
       fn_str = self.vocab['program_idx_to_token'][fn_idx]
     else:
       used_fn_j = False
-      fn_str = 'scene'
+      fn_str = self.scene
     if fn_str == '<NULL>':
       used_fn_j = False
-      fn_str = 'scene'
+      fn_str = self.scene
     elif fn_str == '<START>':
       used_fn_j = False
       return self._forward_modules_ints_helper(feats, program, i, j + 1)
@@ -154,10 +164,10 @@ class ModuleNet(nn.Module):
       self.used_fns[i, j] = 1
     j += 1
     module = self.function_modules[fn_str]
-    if fn_str == 'scene':
+    num_inputs = self.function_modules_num_inputs[fn_str]
+    if num_inputs == 0:
       module_inputs = [feats[i:i+1]]
     else:
-      num_inputs = self.function_modules_num_inputs[fn_str]
       module_inputs = []
       while len(module_inputs) < num_inputs:
         cur_input, j = self._forward_modules_ints_helper(feats, program, i, j)

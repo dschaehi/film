@@ -81,7 +81,7 @@ class FiLMedNet(nn.Module):
     self.print_verbose_every = print_verbose_every
 
     # Initialize helper variables
-    self.stem_use_coords = (stem_stride2_freq == 0) and (self.use_coords_freq > 0)
+    self.stem_use_coords = False  # (stem_stride2_freq == 0) and (self.use_coords_freq > 0)
     self.condition_pattern = condition_pattern
     if len(condition_pattern) == 0:
       self.condition_pattern = []
@@ -105,7 +105,8 @@ class FiLMedNet(nn.Module):
     else:
       module_H = feature_dim[1]
       module_W = feature_dim[2]
-    self.coords = coord_map((module_H, module_W))
+    if use_coords > 0:
+      self.coords = coord_map((module_H, module_W))
     if torch.cuda.is_available():
       self.default_weight = Variable(torch.ones(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)
       self.default_bias = Variable(torch.zeros(1, 1, self.module_dim)).type(torch.cuda.FloatTensor)

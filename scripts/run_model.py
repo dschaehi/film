@@ -31,11 +31,11 @@ from vr.preprocess import tokenize, encode
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--program_generator', default='models/best.pt')
-parser.add_argument('--execution_engine', default='models/best.pt')
+parser.add_argument('--program_generator', default=None)
+parser.add_argument('--execution_engine', default=None)
 parser.add_argument('--baseline_model', default=None)
 parser.add_argument('--model_type', default='FiLM',
-  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
+  choices=['FiLM', 'PG', 'EE', 'PG+EE', 'CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
 parser.add_argument('--debug_every', default=float('inf'), type=float)
 # parser.add_argument('--use_gpu', default=1, type=int)
 
@@ -43,16 +43,23 @@ parser.add_argument('--debug_every', default=float('inf'), type=float)
 parser.add_argument('--input_question_h5', default=None)
 parser.add_argument('--input_features_h5', default=None)
 
-# This will override the vocab stored in the checkpoint;
-# we need this to run CLEVR models on human data
-parser.add_argument('--vocab_json', default=None)
-
-# ShapeWorld input data (ignores the three above)
+# ShapeWorld input data (ignores all of the above)
+parser.add_argument('--sw_type', default='agreement')
 parser.add_argument('--sw_name', default=None)
 parser.add_argument('--sw_variant', default=None)
 parser.add_argument('--sw_language', default=None)
 parser.add_argument('--sw_config', default=None)
-parser.add_argument('--sw_mode', default=None)
+parser.add_argument('--sw_features', default=0, type=int)
+parser.add_argument('--sw_program', default=0, type=int)  # 0: none, 1: pn, 2: rpn, 3: clevr-style
+parser.add_argument('--sw_mode', default='test')
+parser.add_argument('--sw_pred_dir', default=None)
+parser.add_argument('--sw_pred_name', default=None)
+parser.add_argument('--sw_vis_dir', default=None)
+parser.add_argument('--sw_vis_name', default=None)
+
+# This will override the vocab stored in the checkpoint;
+# we need this to run CLEVR models on human data
+parser.add_argument('--vocab_json', default=None)
 
 # For running on a single example
 parser.add_argument('--question', default=None)
@@ -85,6 +92,7 @@ parser.add_argument('--betas_from', default=None)  # Load betas from file
 
 # If this is passed, then save all predictions to this file
 parser.add_argument('--output_h5', default=None)
+parser.add_argument('--output_params', default=None)
 parser.add_argument('--output_preds', default=None)
 parser.add_argument('--output_viz_dir', default=None)
 parser.add_argument('--output_program_stats_dir', default=None)
@@ -96,7 +104,7 @@ def main(args):
   if args.debug_every <= 1:
     pdb.set_trace()
 
-  if args.sw_name is not None:
+  if args.sw_name is not None or args.sw_config is not None:
     assert args.image is None and args.question is None
 
     from shapeworld import Dataset, torch_util
@@ -104,34 +112,104 @@ def main(args):
 
     class ShapeWorldDataLoader(torch_util.ShapeWorldDataLoader):
 
-      def __init__(self, **kwargs):
-        super(ShapeWorldDataLoader, self).__init__(**kwargs)
-
       def __iter__(self):
         for batch in super(ShapeWorldDataLoader, self).__iter__():
-          question = batch['caption'].long()
-          image = batch['world']
-          feats = batch['world']
-          answer = batch['agreement'].long()
-          if 'caption_model' in batch:
-            program_seq = batch['caption_model'].apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+          if 'caption' in batch:
+            question = batch['caption'].long()
           else:
-            program_seq = torch.IntTensor([0 for _ in batch['caption']])
+            question = batch['question'].long()
+          if args.sw_features == 1:
+            image = batch['world_features']
+          else:
+            image = batch['world']
+          feats = image
+          if 'agreement' in batch:
+            answer = batch['agreement'].long()
+          else:
+            answer = batch['answer'].long()
+          if 'caption_model' in batch:
+            assert args.sw_name.startswith('clevr') or args.sw_program == 3
+            program_seq = batch['caption_model']
+            # .apply_(callable=(lambda model: clevr_util.parse_program(mode=0, model=model)))
+          elif 'question_model' in batch:
+            program_seq = batch['question_model']
+          elif 'caption' in batch:
+            if args.sw_program == 1:
+              program_seq = batch['caption_pn'].long()
+            elif args.sw_program == 2:
+              program_seq = batch['caption_rpn'].long()
+            else:
+              program_seq = [None]
+          else:
+            program_seq = [None]
+          # program_seq = torch.IntTensor([0 for _ in batch['question']])
           program_json = dict()
           yield question, image, feats, answer, program_seq, program_json
 
-    dataset = Dataset.create(dtype='agreement', name=args.sw_name, variant=args.sw_variant,
+    dataset = Dataset.create(dtype=args.sw_type, name=args.sw_name, variant=args.sw_variant,
       language=args.sw_language, config=args.sw_config)
     print('ShapeWorld dataset: {} (variant: {})'.format(dataset, args.sw_variant))
     print('Config: ' + str(args.sw_config))
 
-    dataset = torch_util.ShapeWorldDataset(dataset=dataset, mode=(None if args.sw_mode == 'none' else args.sw_mode), epoch=(args.num_samples is None))  # include_model=True
+    if args.program_generator is not None:
+      with open(args.program_generator + '.vocab', 'r') as filehandle:
+        vocab = json.load(filehandle)
+    elif args.execution_engine is not None:
+      with open(args.execution_engine + '.vocab', 'r') as filehandle:
+        vocab = json.load(filehandle)
+    elif args.baseline_model is not None:
+      with open(args.baseline_model + '.vocab', 'r') as filehandle:
+        vocab = json.load(filehandle)
+    program_token_to_idx = vocab['program_token_to_idx']
 
-    loader = ShapeWorldDataLoader(dataset=dataset, batch_size=args.batch_size)  # num_workers=1
+    include_model = args.model_type in ('PG', 'EE', 'PG+EE') and (args.sw_name.startswith('clevr') or args.sw_program == 3)
+    if include_model:
+
+      def preprocess(model):
+        if args.sw_name.startswith('clevr'):
+          program_prefix = vr.programs.list_to_prefix(model['program'])
+        else:
+          program_prefix = clevr_util.parse_program(mode=0, model=model)
+        program_str = vr.programs.list_to_str(program_prefix)
+        program_tokens = tokenize(program_str)
+        program_encoded = encode(program_tokens, program_token_to_idx)
+        program_encoded += [program_token_to_idx['<NULL>'] for _ in range(27 - len(program_encoded))]
+        return np.asarray(program_encoded, dtype=np.int64)
+
+      if args.sw_name.startswith('clevr'):
+        preprocessing = dict(question_model=preprocess)
+      else:
+        preprocessing = dict(caption_model=preprocess)
+
+    elif args.sw_program in (1, 2):
+
+      def preprocess(caption_pn):
+        caption_pn += (caption_pn > 0) * 2
+        for n, symbol in enumerate(caption_pn):
+          if symbol == 0:
+            caption_pn[n] = 2
+            break
+        caption_pn = np.concatenate(([1], caption_pn))
+        return caption_pn
+
+      if args.sw_program == 1:
+        preprocessing = dict(caption_pn=preprocess)
+      else:
+        preprocessing = dict(caption_rpn=preprocess)
+
+    else:
+      preprocessing = None
+
+    dataset = torch_util.ShapeWorldDataset(
+      dataset=dataset, mode=(None if args.sw_mode == 'none' else args.sw_mode), include_model=include_model,
+      epoch=(args.num_samples is None), preprocessing=preprocessing
+    )
+
+    loader = ShapeWorldDataLoader(dataset=dataset, batch_size=args.batch_size)
 
   model = None
-  if args.baseline_model is not None:
-    assert args.model_type in ('LSTM', 'CNN+LSTM', 'CNN+LSTM+SA')
+  if args.model_type in ('CNN', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'):
+    assert args.baseline_model is not None
     print('Loading baseline model from', args.baseline_model)
     model, _ = utils.load_baseline(args.baseline_model)
     if args.vocab_json is not None:
@@ -141,6 +219,15 @@ def main(args):
     pg, _ = utils.load_program_generator(args.program_generator, args.model_type)
     ee, _ = utils.load_execution_engine(
       args.execution_engine, verbose=False, model_type=args.model_type)
+    if args.vocab_json is not None:
+      new_vocab = utils.load_vocab(args.vocab_json)
+      pg.expand_encoder_vocab(new_vocab['question_token_to_idx'])
+    model = (pg, ee)
+  elif args.model_type == 'FiLM':
+    assert args.baseline_model is not None
+    pg, _ = utils.load_program_generator(args.baseline_model, args.model_type)
+    ee, _ = utils.load_execution_engine(
+      args.baseline_model, verbose=False, model_type=args.model_type)
     if args.vocab_json is not None:
       new_vocab = utils.load_vocab(args.vocab_json)
       pg.expand_encoder_vocab(new_vocab['question_token_to_idx'])
@@ -163,8 +250,40 @@ def main(args):
       # Get user question
       question_raw = input(">>> ")
       run_single_example(args, model, dtype, question_raw, feats_var)
-  elif args.sw_name is not None:
-    run_batch(args, model, dtype, loader)
+  elif args.sw_name is not None or args.sw_config is not None:
+    predictions, visualization = run_batch(args, model, dtype, loader)
+    if args.sw_pred_dir is not None:
+      assert args.sw_pred_name is not None
+      pred_dir = os.path.join(args.sw_pred_dir, dataset.dataset.type, dataset.dataset.name, dataset.dataset.variant)
+      if not os.path.isdir(pred_dir):
+        os.makedirs(pred_dir)
+      id2word = dataset.dataset.vocabulary(value_type='language')
+      with open(os.path.join(pred_dir, args.sw_pred_name + '-' + args.sw_mode + '.txt'), 'w') as filehandle:
+        filehandle.write(
+          ''.join('{} {} {}\n'.format(correct, agreement, ' '.join(id2word[c] for c in caption))
+            for correct, agreement, caption in zip(predictions['correct'], predictions['agreement'], predictions['caption']))
+        )
+      print('Predictions saved')
+    if args.sw_vis_dir is not None:
+      assert args.sw_vis_name is not None
+      from io import BytesIO
+      from shapeworld.world import World
+      vis_dir = os.path.join(args.sw_vis_dir, dataset.dataset.type, dataset.dataset.name, dataset.dataset.variant)
+      image_dir = os.path.join(vis_dir, args.sw_mode, 'images')
+      if not os.path.isdir(image_dir):
+        os.makedirs(image_dir)
+      worlds = np.transpose(visualization['world'], (0, 2, 3, 1))
+      for n in range(worlds.shape[0]):
+        image = World.get_image(world_array=worlds[n])
+        image_bytes = BytesIO()
+        image.save(image_bytes, format='png')
+        with open(os.path.join(image_dir, 'world-{}.png'.format(n)), 'wb') as filehandle:
+          filehandle.write(image_bytes.getvalue())
+        image_bytes.close()
+      with open(os.path.join(vis_dir, args.sw_vis_name + '-' + args.sw_mode + '.html'), 'w') as filehandle:
+        html = dataset.dataset.get_html(generated=visualization, image_format='png', image_dir=(args.sw_mode + '/images/'))
+        filehandle.write(html)
+      print('Visualization saved')
   else:
     vocab = load_vocab(args)
     loader_kwargs = {
@@ -341,12 +460,17 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
   q_types = []
   film_params = []
 
+  predictions = dict()
+  visualization = dict()
+
   if args.num_last_words_shuffled == -1:
     print('All words of each question shuffled.')
   elif args.num_last_words_shuffled > 0:
     print('Last %d words of each question shuffled.' % args.num_last_words_shuffled)
   start = time.time()
-  for batch in tqdm(loader):
+  if args.sw_name is None and args.sw_config is None:
+    loader = tqdm(loader)
+  for batch in loader:
     assert(not pg.training)
     assert(not ee.training)
     questions, images, feats, answers, programs, program_lists = batch
@@ -397,16 +521,49 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
     all_scores.append(scores.data.cpu().clone())
     all_probs.append(probs.data.cpu().clone())
     all_preds.append(preds.cpu().clone())
+    num_samples += preds.size(0)
+
     if answers[0] is not None:
       num_correct += (preds == answers).sum()
-    num_samples += preds.size(0)
+
+      if args.sw_pred_dir is not None or args.sw_vis_dir is not None:
+        preds = preds.numpy()
+        answers = answers.numpy()
+
+      if args.sw_pred_dir is not None:
+        correct = (preds == answers).astype(float)
+        caption = questions.numpy()
+        if len(predictions) == 0:
+          predictions['correct'] = correct
+          predictions['agreement'] = answers
+          predictions['caption'] = caption
+        else:
+          predictions['correct'] = np.concatenate((predictions['correct'], correct))
+          predictions['agreement'] = np.concatenate((predictions['agreement'], answers))
+          predictions['caption'] = np.concatenate((predictions['caption'], caption))
+
+      if args.sw_vis_dir is not None:
+        incorrect = (preds != answers)
+        world = images.numpy()
+        caption = questions.numpy()
+        caption_zero = (caption == 0)
+        caption_length = np.where(caption_zero.any(1), caption_zero.argmax(1), caption.shape[1])
+        if len(visualization) == 0:
+          visualization['world'] = world[incorrect]
+          visualization['caption'] = caption[incorrect]
+          visualization['caption_length'] = caption_length[incorrect]
+          visualization['agreement'] = answers[incorrect]
+        else:
+          visualization['world'] = np.concatenate((visualization['world'], world[incorrect]))
+          visualization['caption'] = np.concatenate((visualization['caption'], caption[incorrect]))
+          visualization['caption_length'] = np.concatenate((visualization['caption_length'], caption_length[incorrect]))
+          visualization['agreement'] = np.concatenate((visualization['agreement'], answers[incorrect]))
 
     if args.num_samples is not None and num_samples >= args.num_samples:
       break
 
   acc = float(num_correct) / num_samples
   print('Got %d / %d = %.2f correct' % (num_correct, num_samples, 100 * acc))
-  print('%.2fs to evaluate' % (start - time.time()))
   all_programs = torch.cat(all_programs, 0)
   all_scores = torch.cat(all_scores, 0)
   all_probs = torch.cat(all_probs, 0)
@@ -419,9 +576,10 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
       fout.create_dataset('predicted_programs', data=all_programs.numpy())
 
   # Save FiLM params
-  np.save('film_params', np.vstack(film_params))
-  if isinstance(questions, list):
-    np.save('q_types', np.vstack(q_types))
+  if args.output_params is not None:
+    np.save('film_params', np.vstack(film_params))
+    if isinstance(questions, list):
+      np.save('q_types', np.vstack(q_types))
 
   # Save FiLM param stats
   if args.output_program_stats_dir:
@@ -451,7 +609,8 @@ def run_our_model_batch(args, pg, ee, loader, dtype):
 
   if args.debug_every <= 1:
     pdb.set_trace()
-  return
+
+  return predictions, visualization
 
 
 def visualize(features, args, file_name=None):
@@ -514,9 +673,9 @@ def build_cnn(args, dtype):
 def run_batch(args, model, dtype, loader):
   if type(model) is tuple:
     pg, ee = model
-    run_our_model_batch(args, pg, ee, loader, dtype)
+    return run_our_model_batch(args, pg, ee, loader, dtype)
   else:
-    run_baseline_batch(args, model, loader, dtype)
+    return run_baseline_batch(args, model, loader, dtype)
 
 
 def run_baseline_batch(args, model, loader, dtype):
@@ -525,6 +684,10 @@ def run_baseline_batch(args, model, loader, dtype):
 
   all_scores, all_probs = [], []
   num_correct, num_samples = 0, 0
+
+  predictions = dict()
+  visualization = dict()
+
   for batch in loader:
     questions, images, feats, answers, programs, program_lists = batch
 
@@ -540,6 +703,39 @@ def run_baseline_batch(args, model, loader, dtype):
     num_correct += (preds == answers).sum()
     num_samples += preds.size(0)
 
+    if args.sw_pred_dir is not None or args.sw_vis_dir is not None:
+      preds = preds.numpy()
+      answers = answers.numpy()
+
+    if args.sw_pred_dir is not None:
+      correct = (preds == answers).astype(float)
+      caption = questions.numpy()
+      if len(predictions) == 0:
+        predictions['correct'] = correct
+        predictions['agreement'] = answers
+        predictions['caption'] = caption
+      else:
+        predictions['correct'] = np.concatenate((predictions['correct'], correct))
+        predictions['agreement'] = np.concatenate((predictions['agreement'], answers))
+        predictions['caption'] = np.concatenate((predictions['caption'], caption))
+
+    if args.sw_vis_dir is not None:
+      incorrect = (preds != answers)
+      world = images.numpy()
+      caption = questions.numpy()
+      caption_zero = (caption == 0)
+      caption_length = np.where(caption_zero.any(1), caption_zero.argmax(1), caption.shape[1])
+      if len(visualization) == 0:
+        visualization['world'] = world[incorrect]
+        visualization['caption'] = caption[incorrect]
+        visualization['caption_length'] = caption_length[incorrect]
+        visualization['agreement'] = answers[incorrect]
+      else:
+        visualization['world'] = np.concatenate((visualization['world'], world[incorrect]))
+        visualization['caption'] = np.concatenate((visualization['caption'], caption[incorrect]))
+        visualization['caption_length'] = np.concatenate((visualization['caption_length'], caption_length[incorrect]))
+        visualization['agreement'] = np.concatenate((visualization['agreement'], answers[incorrect]))
+
   acc = float(num_correct) / num_samples
   print('Got %d / %d = %.2f correct' % (num_correct, num_samples, 100 * acc))
 
@@ -550,6 +746,8 @@ def run_baseline_batch(args, model, loader, dtype):
     with h5py.File(args.output_h5, 'w') as fout:
       fout.create_dataset('scores', data=all_scores.numpy())
       fout.create_dataset('probs', data=all_probs.numpy())
+
+  return predictions, visualization
 
 
 def load_vocab(args):

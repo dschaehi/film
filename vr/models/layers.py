@@ -7,7 +7,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import ipdb as pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,14 +45,14 @@ class ResidualBlock(nn.Module):
 
 
 class ConcatBlock(nn.Module):
-  def __init__(self, dim, with_residual=True, with_batchnorm=True):
+  def __init__(self, num_inputs, dim, with_residual=True, with_batchnorm=True):
     super(ConcatBlock, self).__init__()
-    self.proj = nn.Conv2d(2 * dim, dim, kernel_size=1, padding=0)
+    self.proj = nn.Conv2d(num_inputs * dim, dim, kernel_size=1, padding=0)
     self.res_block = ResidualBlock(dim, with_residual=with_residual,
                         with_batchnorm=with_batchnorm)
 
-  def forward(self, x, y):
-    out = torch.cat([x, y], 1) # Concatentate along depth
+  def forward(self, *xs):
+    out = torch.cat(xs, 1) # Concatentate along depth
     out = F.relu(self.proj(out))
     out = self.res_block(out)
     return out
@@ -76,8 +75,8 @@ class Flatten(nn.Module):
     return x.view(x.size(0), -1)
 
 
-def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_stage=3, num_layers=2, with_batchnorm=True,
-               kernel_size=3, stride=1, stride2_freq=0, padding=None):
+def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_stage=3, num_layers=2,
+               with_batchnorm=True, kernel_size=3, stride=1, stride2_freq=0, padding=None):
   if use_resnet:
     if not hasattr(torchvision.models, 'resnet101'):
       raise ValueError('Invalid model "resnet101"')
@@ -113,7 +112,7 @@ def build_stem(use_resnet, resnet_fixed, feature_dim, module_dim, resnet_model_s
     prev_dim = feature_dim
     if padding is None:  # Calculate default padding when None provided
       if kernel_size % 2 == 0:
-        raise(NotImplementedError)
+        raise NotImplementedError
       padding = kernel_size // 2
     for i in range(num_layers):
       if stride2_freq > 0 and (i + 1) % stride2_freq == 0:
@@ -139,13 +138,13 @@ def build_relational_module(feature_dim, module_dim=256, num_layers=4):
   return nn.Sequential(*layers)
 
 
-def build_multimodal_core(feature_dim, module_dim=256, num_layers=4, with_batchnorm=True):
+def build_multimodal_core(feature_dim, module_dim=256, num_layers=4, with_batchnorm=True, kernel_size=1):
   layers = []
   if with_batchnorm:
     layers.append(nn.BatchNorm2d(feature_dim))
   prev_dim = feature_dim
   for i in range(num_layers):
-    layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=1, stride=1))
+    layers.append(nn.Conv2d(prev_dim, module_dim, kernel_size=kernel_size, stride=1, padding=kernel_size // 2))
     layers.append(nn.ReLU(inplace=True))
     prev_dim = module_dim
   return nn.Sequential(*layers)
@@ -153,7 +152,7 @@ def build_multimodal_core(feature_dim, module_dim=256, num_layers=4, with_batchn
 
 def build_classifier(module_C, module_H, module_W, num_answers,
                      fc_dims=[], proj_dim=None, downsample='maxpool2',
-                     with_batchnorm=True, dropout=0):
+                     with_batchnorm=True, dropout=()):
   layers = []
   if module_H is None and module_W is None:
     module_H = module_W = 1
@@ -180,17 +179,19 @@ def build_classifier(module_C, module_H, module_W, num_answers,
     layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
     layers.append(nn.AvgPool2d(kernel_size=module_H // 2, stride=module_W // 2))
     module_H = module_W = 1
-    fc_dims = []  # No FC layers here
+    assert fc_dims == []  # No FC layers here
   if downsample is not None:
     layers.append(Flatten())
   prev_dim = module_C * module_H * module_W
-  for next_dim in fc_dims:
+  if isinstance(dropout, (int, float)):
+    dropout = [dropout for _ in fc_dims]
+  for next_dim, p in zip(fc_dims, dropout):
     layers.append(nn.Linear(prev_dim, next_dim))
     if with_batchnorm:
       layers.append(nn.BatchNorm1d(next_dim))
     layers.append(nn.ReLU(inplace=True))
-    if dropout > 0:
-      layers.append(nn.Dropout(p=dropout))
+    if p > 0.0:
+      layers.append(nn.Dropout(p=p))
     prev_dim = next_dim
   layers.append(nn.Linear(prev_dim, num_answers))
   return nn.Sequential(*layers)
