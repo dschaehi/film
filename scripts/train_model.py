@@ -289,6 +289,8 @@ def main(args):
         # exclude_values = ('world',) if args.sw_features == 1 else ('world_features',)
         # dataset = Dataset.create(dtype=args.sw_type, name=args.sw_name, variant=args.sw_variant,
         #   language=args.sw_language, config=args.sw_config, exclude_values=exclude_values)
+
+        # TODO: I guess I can either replace this with existing datasets or pass different parameters to ``train_model.py``
         dataset = Dataset.create(
             dtype=args.sw_type,
             name=args.sw_name,
